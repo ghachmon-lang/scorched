@@ -84,13 +84,14 @@ export function money(n) {
 // ------------------------------------------------------------ screens
 
 export function menuScreen(app) {
-  const online = app.netAvailable();
+  const cfg = window.SCORCHED_CONFIG || {};
+  const online = app.netAvailable() && !cfg.onlineDisabled;
   return h('section', { class: 'screen' }, page(
     h('div', { class: 'title' }, h('h1', {}, 'SCORCHED EARTH'), h('div', { class: 'sub' }, 'The Mother of All Games. Now in your pocket.')),
     h('button', { class: 'btn primary', onclick: () => app.gotoSetup(false) }, 'Pass & Play'),
     h('button', { class: 'btn accent', onclick: () => app.gotoHost(), disabled: !online }, 'Host online game'),
     h('button', { class: 'btn accent', onclick: () => app.gotoJoin(), disabled: !online }, 'Join online game'),
-    !online && h('div', { class: 'muted', style: { textAlign: 'center' } }, 'Online play needs the PeerJS library (vendor/peerjs.min.js) and a network connection.'),
+    !online && h('div', { class: 'muted', style: { textAlign: 'center' } }, cfg.onlineDisabled || 'Online play needs the PeerJS library (vendor/peerjs.min.js) and a network connection.'),
     h('div', { class: 'row' },
       h('button', { class: 'btn grow', onclick: () => app.gotoSettings() }, 'Settings'),
       h('button', { class: 'btn grow', onclick: () => app.gotoHelp() }, 'How to play'),
