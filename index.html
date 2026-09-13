@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Scorched Earth</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no, interactive-widget=resizes-content">
+<meta name="description" content="Scorched Earth: the classic 1991 artillery game, rebuilt for phones. Pass-and-play or online with friends.">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Scorched">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <div id="screens"></div>
+  <section id="screen-game" class="screen" hidden>
+    <div id="stage">
+      <canvas id="game" width="640" height="360" aria-label="Battlefield"></canvas>
+      <div id="stage-overlay"></div>
+    </div>
+    <div id="controls">
+      <div id="ctl-status">
+        <span id="ctl-name" class="ctl-name">—</span>
+        <span id="ctl-hp" class="ctl-hp">HP 100</span>
+        <span id="ctl-cash" class="ctl-cash">$0</span>
+        <span id="ctl-wind" class="ctl-wind">WIND 0</span>
+      </div>
+      <div id="ctl-row">
+        <div class="ctl-group">
+          <button class="ctl-btn hold" data-act="angle" data-d="1" aria-label="Aim left">◀</button>
+          <div class="ctl-val"><small>ANGLE</small><b id="ctl-angle">45</b></div>
+          <button class="ctl-btn hold" data-act="angle" data-d="-1" aria-label="Aim right">▶</button>
+        </div>
+        <div class="ctl-group">
+          <button class="ctl-btn hold" data-act="power" data-d="-10" aria-label="Less power">−</button>
+          <div class="ctl-val"><small>POWER</small><b id="ctl-power">400</b></div>
+          <button class="ctl-btn hold" data-act="power" data-d="10" aria-label="More power">+</button>
+        </div>
+        <button id="btn-weapon" class="ctl-wide" data-act="weapon"><small>WEAPON</small><b id="ctl-weapon">Baby Missile</b></button>
+        <button id="btn-items" class="ctl-wide" data-act="items"><small>ITEMS</small><b id="ctl-items">—</b></button>
+        <button id="btn-fire" class="ctl-fire" data-act="fire">FIRE</button>
+      </div>
+      <div id="ctl-wait" hidden><span id="ctl-wait-text">Waiting…</span></div>
+      <div id="ctl-side">
+        <button class="ctl-mini" data-act="menu" aria-label="Menu">☰</button>
+        <button class="ctl-mini" data-act="speed" aria-label="Fast forward">⏩</button>
+        <button class="ctl-mini" data-act="chat" aria-label="Chat" hidden>💬</button>
+      </div>
+    </div>
+  </section>
+  <div id="modal" hidden><div id="modal-box"></div></div>
+  <div id="toast" hidden></div>
+</div>
+<script src="vendor/peerjs.min.js"></script>
+<script type="module" src="src/main.js"></script>
+</body>
+</html>

@@ -282,6 +282,15 @@ export class Game {
         this.emit('aiTakeover', { p });
         return true;
       }
+      case 'takeover': {
+        // a human (re)takes control of a tank, e.g. after reconnecting
+        const pl = this.players[p];
+        pl.type = 'human';
+        pl.owner = cmd.owner || null;
+        if (this.phase === 'aim' && this.current === p) this.aiPlan = null;
+        this.emit('takeover', { p });
+        return true;
+      }
       case 'skip':
         if (this.phase !== 'aim' || p !== this.current) return false;
         this.emit('skip', { p });
@@ -526,6 +535,11 @@ export class Game {
       if (this.tanks[this.order[this.orderPos]].alive) break;
     }
     this.current = this.order[this.orderPos];
+    {
+      // fall back to the baby missile once the selected weapon has run out
+      const t = this.tanks[this.current];
+      if (!this.ownsWeapon(this.players[this.current], t.weapon)) t.weapon = 'baby_missile';
+    }
     if (this.settings.windMode === 'changing') {
       const target = Math.round(this.rng.irange(-100, 100) * this.settings.windStrength);
       this.wind = Math.round((this.wind + target) / 2);
@@ -1048,6 +1062,15 @@ export class Game {
       for (const k in p.items) mix(p.items[k]);
     }
     return h >>> 0;
+  }
+
+  /** The inputs of checksum(), for diagnosing desyncs. */
+  debugState() {
+    return {
+      terrain: this.terrain.checksum(), rng: this.rng.s, round: this.round, turnNo: this.turnNo, wind: this.wind,
+      tanks: this.tanks.map((t) => [t.x, t.y, t.hp, t.alive ? 1 : 0, t.shield ? t.shield.pts : -1]),
+      players: this.players.map((p) => [p.cash, p.kills, p.wins, JSON.stringify(p.weapons), JSON.stringify(p.items)]),
+    };
   }
 
   /** Full state snapshot (only meaningful while idle: no shells in flight). */

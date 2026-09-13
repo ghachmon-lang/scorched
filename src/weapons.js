@@ -42,15 +42,15 @@ WEAPONS.funky_sub = { name: 'Funky Bomb', price: 0, qty: 0, kind: 'funky_sub', r
 WEAPONS.tank = { name: 'Tank Explosion', price: 0, qty: 0, kind: 'shell', radius: 20, damage: 30, color: '#ffffff', hidden: true };
 
 export const ITEMS = {
-  shield: { name: 'Shield', price: 2000, qty: 3, kind: 'shield', points: 100, color: '#55ffff', desc: 'Absorbs 100 points of damage.' },
-  deflector: { name: 'Deflector Shield', price: 5000, qty: 3, kind: 'shield', points: 150, deflect: true, color: '#5555ff', desc: 'Absorbs 150 points and bounces shells away.' },
-  force_shield: { name: 'Force Shield', price: 8000, qty: 3, kind: 'shield', points: 200, color: '#ffffff', desc: 'Absorbs 200 points of damage.' },
-  heavy_shield: { name: 'Heavy Shield', price: 10000, qty: 2, kind: 'shield', points: 300, color: '#ffff55', desc: 'Absorbs 300 points of damage.' },
-  mag_deflector: { name: 'Mag Deflector', price: 10000, qty: 1, kind: 'shield', points: 100, magnetic: true, color: '#ff55ff', desc: 'Absorbs 100 points and repels incoming shells.' },
-  parachute: { name: 'Parachutes', price: 1000, qty: 3, kind: 'parachute', color: '#ffffff', desc: 'Opens automatically when you fall. No fall damage.' },
-  battery: { name: 'Batteries', price: 2500, qty: 5, kind: 'battery', heal: 15, color: '#ffff55', desc: 'Repairs 15 points of damage.' },
-  fuel: { name: 'Fuel Tanks', price: 2000, qty: 10, kind: 'fuel', color: '#ff5555', desc: 'Drive your tank 10 pixels per unit.' },
-  auto_defense: { name: 'Auto Defense', price: 5000, qty: 1, kind: 'auto_defense', permanent: true, color: '#55ff55', desc: 'Raises your best shield at the start of every round.' },
+  shield: { short: 'Shield', name: 'Shield', price: 2000, qty: 3, kind: 'shield', points: 100, color: '#55ffff', desc: 'Absorbs 100 points of damage.' },
+  deflector: { short: 'Deflector', name: 'Deflector Shield', price: 5000, qty: 3, kind: 'shield', points: 150, deflect: true, color: '#5555ff', desc: 'Absorbs 150 points and bounces shells away.' },
+  force_shield: { short: 'Force', name: 'Force Shield', price: 8000, qty: 3, kind: 'shield', points: 200, color: '#ffffff', desc: 'Absorbs 200 points of damage.' },
+  heavy_shield: { short: 'Heavy', name: 'Heavy Shield', price: 10000, qty: 2, kind: 'shield', points: 300, color: '#ffff55', desc: 'Absorbs 300 points of damage.' },
+  mag_deflector: { short: 'Mag', name: 'Mag Deflector', price: 10000, qty: 1, kind: 'shield', points: 100, magnetic: true, color: '#ff55ff', desc: 'Absorbs 100 points and repels incoming shells.' },
+  parachute: { short: 'Chutes', name: 'Parachutes', price: 1000, qty: 3, kind: 'parachute', color: '#ffffff', desc: 'Opens automatically when you fall. No fall damage.' },
+  battery: { short: 'Batteries', name: 'Batteries', price: 2500, qty: 5, kind: 'battery', heal: 15, color: '#ffff55', desc: 'Repairs 15 points of damage.' },
+  fuel: { short: 'Fuel', name: 'Fuel Tanks', price: 2000, qty: 10, kind: 'fuel', color: '#ff5555', desc: 'Drive your tank 10 pixels per unit.' },
+  auto_defense: { short: 'AutoDef', name: 'Auto Defense', price: 5000, qty: 1, kind: 'auto_defense', permanent: true, color: '#55ff55', desc: 'Raises your best shield at the start of every round.' },
 };
 
 export const ITEM_ORDER = Object.keys(ITEMS);
@@ -60,3 +60,25 @@ export const MONEY_PER_DAMAGE = 75;
 export const KILL_BONUS = 5000;
 export const WIN_BONUS = 10000;
 export const SURVIVE_BONUS = 2000;
+
+/** One-line description of what a weapon does (for pickers and the shop). */
+export function weaponDesc(w) {
+  switch (w.kind) {
+    case 'shell': return `Explodes on impact. Radius ${w.radius}, damage ${w.damage}.`;
+    case 'mirv': return `Splits into ${w.warheads} warheads at the top of its arc.`;
+    case 'leapfrog': return `Explodes and bounces on, ${w.hops} times.`;
+    case 'funky': return `Explodes, then scatters ${w.subs} bomblets.`;
+    case 'napalm': return 'Burning liquid that flows downhill.';
+    case 'tracer': return w.smoke ? 'Harmless. Leaves a smoke trail.' : 'Harmless. Shows where a shot lands.';
+    case 'roller': return `Rolls downhill until it hits something. Radius ${w.radius}.`;
+    case 'riot_cone': return 'Blasts dirt away in a cone. No damage.';
+    case 'riot': return `Clears a circle of dirt (radius ${w.radius}). No damage.`;
+    case 'digger': return `Tunnels ${w.length} pixels through dirt.`;
+    case 'sandhog': return `Burrows ${w.length} pixels in random directions, then explodes.`;
+    case 'dirt': return `Dumps a ball of dirt (radius ${w.radius}).`;
+    case 'liquid_dirt': return 'Flowing dirt that sets where it lands.';
+    case 'laser': return 'Instant straight beam. Burns through some dirt.';
+    default: return '';
+  }
+}
+
