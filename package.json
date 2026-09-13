@@ -1,0 +1,12 @@
+{
+  "name": "scorched-earth-mobile",
+  "version": "1.0.0",
+  "description": "A mobile, multiplayer remake of the 1991 DOS artillery classic Scorched Earth. No build step, no dependencies.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node scripts/serve.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "license": "MIT"
+}
