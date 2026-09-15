@@ -1,0 +1,26 @@
+name: Deploy room server
+
+# Deploys server/ to Cloudflare Workers when it changes on main.
+# One-time setup: add a repository secret CLOUDFLARE_API_TOKEN (Workers Scripts: Edit)
+# and, if the account has several, CLOUDFLARE_ACCOUNT_ID. Without the token the job skips.
+on:
+  push:
+    branches: [main]
+    paths: ['server/**']
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      HAS_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: env.HAS_TOKEN != 'true'
+        run: echo "CLOUDFLARE_API_TOKEN is not set; skipping deploy. Run 'npx wrangler deploy' in server/ instead."
+      - if: env.HAS_TOKEN == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: server

@@ -1,0 +1,21 @@
+# Cloudflare Worker that keeps Scorched Earth rooms alive between turns.
+# Deploy with `npx wrangler deploy` from this folder (after `npx wrangler login`).
+name = "scorched-earth"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+[vars]
+# Contact address sent to push services with every notification (required by the Web Push spec).
+VAPID_SUBJECT = "mailto:change-me@example.com"
+# Public half of the VAPID key pair. Generate both halves with `npm run keys`,
+# paste the public key here and store the private JWK with:
+#   npx wrangler secret put VAPID_PRIVATE_JWK
+VAPID_PUBLIC_KEY = ""
