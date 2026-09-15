@@ -122,6 +122,18 @@ export class Game {
   isIdle() {
     return this.phase === 'aim' || this.phase === 'shop' || this.phase === 'gameOver';
   }
+  /** Idle and waiting on a human decision (not on a computer tank's turn). */
+  awaitingInput() {
+    if (!this.isIdle()) return false;
+    if (this.phase === 'aim') return this.players[this.current].type !== 'ai';
+    return true;
+  }
+  /** Player indices that have finished shopping (only meaningful in the shop phase). */
+  shopDoneList() {
+    const out = [];
+    this.shopDone.forEach((d, i) => { if (d) out.push(i); });
+    return out;
+  }
   physicsEnv(wallsOverride) {
     return {
       terrain: this.terrain,

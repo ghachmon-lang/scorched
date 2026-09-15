@@ -148,3 +148,14 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .chat-log div { padding: 2px 0; }
 
 .sticky-bottom { position: sticky; bottom: 0; padding: 10px 0 0; background: linear-gradient(to top, var(--bg) 70%, transparent); }
+
+/* ---------- menu: my games, loading ---------- */
+.game-row { display: flex; gap: 12px; align-items: center; width: 100%; padding: 8px 10px; background: var(--panel2); border: 2px solid var(--border); border-radius: 8px; color: var(--fg); text-align: left; }
+.game-row .code-sm { font-weight: 700; letter-spacing: 0.15em; color: var(--yellow); font-size: 16px; min-width: 60px; }
+.game-row .game-title { font-weight: 700; }
+.game-row .turn-pill { color: #000; background: var(--yellow); border-color: var(--yellow); font-weight: 700; }
+.game-row.your-turn { border-color: var(--yellow); }
+.game-row .forget { min-height: 32px; padding: 2px 8px; }
+.swatch.on { outline: 3px solid #fff; outline-offset: 2px; }
+.progress { height: 10px; background: #000; border: 2px solid var(--border); border-radius: 6px; overflow: hidden; margin-top: 10px; }
+.progress .bar { height: 100%; width: 0; background: var(--yellow); transition: width 0.15s linear; }

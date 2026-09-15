@@ -1,166 +1,129 @@
-// Thin wrapper around PeerJS (WebRTC data channels). One peer hosts a room;
-// everyone else connects to the host, which relays sequenced commands.
-const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const PREFIX = 'scorched-earth-';
-
-export function makeRoomCode(len = 4) {
-  let s = '';
-  const a = new Uint32Array(len);
-  if (globalThis.crypto && crypto.getRandomValues) crypto.getRandomValues(a);
-  else for (let i = 0; i < len; i++) a[i] = Math.floor(Math.random() * 1e9);
-  for (let i = 0; i < len; i++) s += CODE_ALPHABET[a[i] % CODE_ALPHABET.length];
-  return s;
-}
-
-export function normalizeCode(code) {
-  return String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/O/g, '0').replace(/I/g, '1').slice(0, 8);
-}
-
-export class Net {
-  constructor(peerPrefs = {}) {
-    this.peerPrefs = peerPrefs;
-    this.peer = null;
-    this.conns = new Map(); // peerId -> DataConnection (host side)
-    this.hostConn = null; // client side
-    this.isHost = false;
-    this.id = null;
-    this.handlers = new Map();
-    this.closed = false;
-  }
-
-  on(type, fn) {
-    this.handlers.set(type, fn);
-    return this;
-  }
-  emit(type, ...args) {
-    const fn = this.handlers.get(type);
-    if (fn) fn(...args);
-  }
-
-  peerOptions() {
-    const p = this.peerPrefs || {};
-    const opts = {
-      debug: 0,
-      config: {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-        ],
-      },
-    };
-    if (p.host) {
-      opts.host = p.host;
-      if (p.port) opts.port = Number(p.port);
-      if (p.path) opts.path = p.path;
-      opts.secure = p.secure !== false;
-    }
-    if (p.key) opts.key = p.key;
-    if (p.iceServers && Array.isArray(p.iceServers) && p.iceServers.length) opts.config.iceServers = p.iceServers;
-    return opts;
-  }
-
-  static available() {
-    return typeof window !== 'undefined' && typeof window.Peer === 'function';
-  }
-
-  host(code) {
-    this.isHost = true;
-    return new Promise((resolve, reject) => {
-      const peer = new window.Peer(PREFIX + code, this.peerOptions());
-      this.peer = peer;
-      let settled = false;
-      peer.on('open', (id) => {
-        this.id = id;
-        settled = true;
-        resolve(id);
-      });
-      peer.on('connection', (conn) => this.wire(conn));
-      peer.on('error', (err) => {
-        if (!settled) {
-          settled = true;
-          reject(err);
-        } else this.emit('error', err);
-      });
-      peer.on('disconnected', () => {
-        if (!this.closed) {
-          try { peer.reconnect(); } catch { /* ignore */ }
-        }
-      });
-    });
-  }
-
-  join(code) {
-    this.isHost = false;
-    return new Promise((resolve, reject) => {
-      const peer = new window.Peer(this.peerOptions());
-      this.peer = peer;
-      let settled = false;
-      const fail = (err) => {
-        if (!settled) {
-          settled = true;
-          reject(err);
-        } else this.emit('error', err);
-      };
-      peer.on('open', (id) => {
-        this.id = id;
-        const conn = peer.connect(PREFIX + code, { reliable: true, serialization: 'json' });
-        this.hostConn = conn;
-        const timer = setTimeout(() => fail(new Error('Could not reach the host. Check the room code and that the host is still on the lobby screen.')), 15000);
-        conn.on('open', () => {
-          clearTimeout(timer);
-          settled = true;
-          this.wire(conn);
-          resolve(id);
-        });
-        conn.on('error', (e) => { clearTimeout(timer); fail(e); });
-      });
-      peer.on('error', fail);
-      peer.on('disconnected', () => {
-        if (!this.closed) {
-          try { peer.reconnect(); } catch { /* ignore */ }
-        }
-      });
-    });
-  }
-
-  wire(conn) {
-    const id = conn.peer;
-    const ready = () => {
-      this.conns.set(id, conn);
-      this.emit('open', conn);
-    };
-    if (conn.open) ready();
-    else conn.on('open', ready);
-    conn.on('data', (data) => this.emit('message', conn, data));
-    conn.on('close', () => {
-      this.conns.delete(id);
-      this.emit('close', conn);
-    });
-    conn.on('error', (err) => this.emit('connError', conn, err));
-  }
-
-  send(conn, msg) {
-    try {
-      if (conn && conn.open) conn.send(msg);
-    } catch (e) {
-      this.emit('error', e);
-    }
-  }
-  sendHost(msg) {
-    this.send(this.hostConn, msg);
-  }
-  broadcast(msg, except = null) {
-    for (const c of this.conns.values()) if (c !== except) this.send(c, msg);
-  }
-
-  close() {
+// Client for the room server (server/): plain HTTPS calls plus one WebSocket
+// per open room for live updates. Reconnects with backoff; the app catches up
+// on anything missed with state(code, since).
+export class RoomClient {
+  constructor(server, token) {
+    this.server = String(server || '').replace(/\/+$/, '');
+    this.token = token;
+    this.ws = null;
+    this.wsCode = null;
+    this.handlers = {};
     this.closed = true;
+    this.backoff = 1000;
+    this.pingTimer = null;
+    this.retryTimer = null;
+  }
+
+  async req(path, { method = 'GET', body } = {}) {
+    const sep = path.includes('?') ? '&' : '?';
+    const url = `${this.server}${path}${sep}token=${encodeURIComponent(this.token)}`;
+    let res;
     try {
-      for (const c of this.conns.values()) c.close();
-      if (this.hostConn) this.hostConn.close();
-      if (this.peer) this.peer.destroy();
-    } catch { /* ignore */ }
-    this.conns.clear();
-    this.peer = null;
+      res = await fetch(url, {
+        method,
+        headers: body ? { 'content-type': 'application/json' } : undefined,
+        body: body ? JSON.stringify({ ...body, token: this.token }) : undefined,
+      });
+    } catch {
+      throw new Error('Could not reach the game server. Check your connection.');
+    }
+    let data = null;
+    try { data = await res.json(); } catch { data = null; }
+    if (!res.ok) throw new Error((data && data.error) || `Server error ${res.status}`);
+    return data;
+  }
+
+  create({ name, color, settings }) { return this.req('/rooms/create', { method: 'POST', body: { name, color, settings } }).then((d) => d.room); }
+  join(code, { name, color }) { return this.req(`/rooms/${code}/join`, { method: 'POST', body: { name, color } }).then((d) => d.room); }
+  state(code, since = 0) { return this.req(`/rooms/${code}/state?since=${since}`); }
+  summary(code) { return this.req(`/rooms/${code}/summary`); }
+  lobby(code, op) { return this.req(`/rooms/${code}/lobby`, { method: 'POST', body: op }).then((d) => d.room); }
+  start(code, body) { return this.req(`/rooms/${code}/start`, { method: 'POST', body }).then((d) => d.room); }
+  cmd(code, cmd, sum) { return this.req(`/rooms/${code}/cmd`, { method: 'POST', body: { cmd, sum } }); }
+  turn(code, hint) { return this.req(`/rooms/${code}/turn`, { method: 'POST', body: { hint } }); }
+  push(code, subscription, remove = false) { return this.req(`/rooms/${code}/push`, { method: 'POST', body: { subscription, remove } }); }
+  leave(code) { return this.req(`/rooms/${code}/leave`, { method: 'POST', body: {} }); }
+
+  connect(code, handlers) {
+    this.disconnect();
+    this.wsCode = code;
+    this.handlers = handlers || {};
+    this.closed = false;
+    this.backoff = 1000;
+    this.open();
+  }
+
+  open() {
+    if (this.closed || !this.wsCode) return;
+    clearTimeout(this.retryTimer);
+    const url = `${this.server.replace(/^http/, 'ws')}/rooms/${this.wsCode}/ws?token=${encodeURIComponent(this.token)}`;
+    let ws;
+    try {
+      ws = new WebSocket(url);
+    } catch {
+      this.scheduleRetry();
+      return;
+    }
+    this.ws = ws;
+    ws.onopen = () => {
+      if (ws !== this.ws) return;
+      this.backoff = 1000;
+      clearInterval(this.pingTimer);
+      this.pingTimer = setInterval(() => this.send({ t: 'ping' }), 25000);
+      if (this.handlers.open) this.handlers.open();
+    };
+    ws.onmessage = (e) => {
+      if (ws !== this.ws) return;
+      let m;
+      try { m = JSON.parse(e.data); } catch { return; }
+      if (this.handlers.message) this.handlers.message(m);
+    };
+    ws.onclose = () => {
+      if (ws !== this.ws) return;
+      clearInterval(this.pingTimer);
+      this.ws = null;
+      if (this.handlers.close) this.handlers.close();
+      this.scheduleRetry();
+    };
+    ws.onerror = () => { /* onclose follows */ };
+  }
+
+  scheduleRetry() {
+    if (this.closed) return;
+    clearTimeout(this.retryTimer);
+    this.retryTimer = setTimeout(() => this.open(), this.backoff);
+    this.backoff = Math.min(20000, Math.round(this.backoff * 1.7));
+  }
+
+  /** Called when the app returns to the foreground: reconnect right away. */
+  wake() {
+    if (this.closed || !this.wsCode) return;
+    if (!this.ws || this.ws.readyState > 1) {
+      this.backoff = 1000;
+      this.open();
+    }
+  }
+
+  get connected() {
+    return !!this.ws && this.ws.readyState === 1;
+  }
+
+  send(obj) {
+    if (this.connected) {
+      try { this.ws.send(JSON.stringify(obj)); } catch { /* ignore */ }
+    }
+  }
+
+  disconnect() {
+    this.closed = true;
+    clearInterval(this.pingTimer);
+    clearTimeout(this.retryTimer);
+    if (this.ws) {
+      const ws = this.ws;
+      this.ws = null;
+      ws.onclose = null;
+      try { ws.close(); } catch { /* ignore */ }
+    }
+    this.wsCode = null;
   }
 }

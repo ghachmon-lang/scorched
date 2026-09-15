@@ -6,7 +6,7 @@
   "private": true,
   "scripts": {
     "start": "node scripts/serve.mjs",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs && node --test server/test/*.test.mjs"
   },
   "license": "MIT"
 }

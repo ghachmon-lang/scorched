@@ -1,19 +1,25 @@
-// App controller: screens, game loop, pass-and-play flow, shop flow and the
-// online lockstep (host relays sequenced commands; every peer simulates).
-import { Game, DEFAULT_SETTINGS, AI_LEVELS, PLAYER_COLORS, W, H } from './game.js';
+// App controller: screens, the game loop, practice games, and online rooms.
+// Online games live on the room server as a log of sequenced commands; every
+// phone replays that log through the same deterministic simulation.
+import { Game, DEFAULT_SETTINGS, PLAYER_COLORS, W, H } from './game.js';
 import { Renderer } from './render.js';
 import { Sound } from './sound.js';
-import { Net, makeRoomCode, normalizeCode } from './net.js';
+import { RoomClient } from './net.js';
 import { loadPrefs, savePrefs } from './storage.js';
 import { WEAPONS, ITEMS, WEAPON_ORDER, ITEM_ORDER, weaponDesc } from './weapons.js';
 import { randomSeed } from './rng.js';
 import { installInput } from './input.js';
 import { clamp } from './mathd.js';
+import { SERVER_URL } from './config.js';
 import * as UI from './ui.js';
 import { h } from './ui.js';
 
 const TICK_MS = 1000 / 60;
 const $ = (id) => document.getElementById(id);
+
+function normalizeCode(code) {
+  return String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/O/g, '0').replace(/I/g, '1').slice(0, 8);
+}
 
 class App {
   constructor() {
@@ -23,19 +29,16 @@ class App {
     this.renderer = new Renderer(this.canvas);
     this.overlay = $('stage-overlay');
     this.game = null;
-    this.mode = 'local';
-    this.net = null;
-    this.myId = null;
+    this.mode = 'local'; // local (practice) | online
+    this.client = null;
+    this.room = null; // { code, view, lastSeq }
     this.lobby = null;
+    this.myId = null;
     this.speed = 1;
     this.aimUntil = 0;
-    this.pending = []; // client: sequenced commands waiting to be applied
-    this.inbox = []; // host: commands waiting to be sequenced
-    this.seq = 0;
+    this.pending = [];
     this.nextSeq = 1;
-    this.resyncing = false;
-    this.pendingJoins = [];
-    this.dropped = new Map(); // name -> player idx (for rejoin)
+    this.reloadedAtSeq = -1;
     this.lastPhase = '';
     this.lastCurrent = -1;
     this.lastHumanTurn = -1;
@@ -47,23 +50,32 @@ class App {
     this.last = performance.now();
     this.lastAimSent = 0;
     this.awaitingTurn = -1;
+    this.lastReport = '';
+    this.loading = false;
+    this.swReg = null;
     this.applyPrefs();
     installInput(this);
     window.addEventListener('resize', () => this.layout());
     window.addEventListener('orientationchange', () => setTimeout(() => this.layout(), 200));
     window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); this.installPrompt = e; });
-    document.addEventListener('visibilitychange', () => { this.last = performance.now(); });
+    document.addEventListener('visibilitychange', () => {
+      this.last = performance.now();
+      if (document.visibilityState === 'visible' && this.client && this.room) {
+        this.client.wake();
+        this.catchUp();
+      }
+    });
     window.addEventListener('beforeunload', (e) => {
-      if (this.game && this.game.phase !== 'gameOver') { e.preventDefault(); e.returnValue = ''; }
+      if (this.game && this.mode === 'local' && this.game.phase !== 'gameOver') { e.preventDefault(); e.returnValue = ''; }
     });
     requestAnimationFrame((t) => this.loop(t));
-    this.route();
     if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-      navigator.serviceWorker.register('sw.js').catch(() => {});
+      navigator.serviceWorker.register('sw.js').then((r) => (this.swReg = r)).catch(() => {});
     }
+    this.route();
   }
 
-  // ------------------------------------------------------------ prefs
+  // ------------------------------------------------------------ prefs / identity
   applyPrefs() {
     this.sound.enabled = this.prefs.sound;
     this.renderer.options.trails = this.prefs.trails;
@@ -75,29 +87,71 @@ class App {
   settings() {
     return { ...DEFAULT_SETTINGS, ...this.prefs.settings };
   }
-  netAvailable() {
-    return Net.available();
+  serverUrl() {
+    return (this.prefs.server || SERVER_URL || '').replace(/\/+$/, '');
+  }
+  onlineAvailable() {
+    const cfg = window.SCORCHED_CONFIG || {};
+    return !cfg.onlineDisabled && !!this.serverUrl();
+  }
+  onlineDisabledReason() {
+    const cfg = window.SCORCHED_CONFIG || {};
+    return cfg.onlineDisabled || 'Online play is not set up: no game server address. Deploy the server/ folder to Cloudflare and paste its URL into src/config.js, or into Settings → Advanced on this phone.';
   }
   install() {
     if (this.installPrompt) this.installPrompt.prompt();
+  }
+  getClient() {
+    const url = this.serverUrl();
+    if (!this.client || this.client.server !== url) {
+      if (this.client) this.client.disconnect();
+      this.client = new RoomClient(url, this.prefs.token);
+    }
+    return this.client;
+  }
+  savedGames() {
+    return Object.values(this.prefs.games || {}).filter((g) => g && g.code).sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+  }
+  rememberGame(view, extra = {}) {
+    const g = this.prefs.games[view.code] || { code: view.code, joinedAt: Date.now() };
+    const me = view.players.find((p) => p.id === view.you);
+    const others = view.players.filter((p) => p.id !== view.you).map((p) => p.name);
+    Object.assign(g, {
+      server: this.serverUrl(),
+      id: view.you || g.id,
+      phase: view.phase,
+      lastSeen: Date.now(),
+      label: others.length ? `vs ${others.slice(0, 3).join(', ')}${others.length > 3 ? '…' : ''}` : (me ? `${me.name}'s room` : `Room ${view.code}`),
+    }, extra);
+    this.prefs.games[view.code] = g;
+    this.savePrefs();
+  }
+  forgetGame(code) {
+    delete this.prefs.games[code];
+    this.savePrefs();
+    this.gotoMenu();
   }
 
   // ------------------------------------------------------------ navigation
   route() {
     const q = new URLSearchParams(location.search);
-    const code = normalizeCode(q.get('join'));
+    const code = normalizeCode(q.get('room') || q.get('join'));
     if (code) {
       history.replaceState(null, '', location.pathname);
-      this.gotoJoin(code);
+      if (this.onlineAvailable()) this.joinFlow(code);
+      else this.gotoMenu();
     } else this.gotoMenu();
   }
   gotoMenu() {
-    this.teardownNet();
+    this.leaveRoomSession();
     this.game = null;
+    this.clearOverlay();
     UI.showScreen(UI.menuScreen(this));
+    this.refreshGameSummaries();
   }
-  gotoSetup() {
-    UI.showScreen(UI.setupScreen(this));
+  gotoPractice() {
+    this.leaveRoomSession();
+    UI.showScreen(UI.practiceScreen(this));
   }
   gotoSettings(back) {
     UI.showScreen(UI.settingsScreen(this, back));
@@ -106,78 +160,95 @@ class App {
     UI.showScreen(UI.helpScreen(this, back));
   }
   gotoJoin(code) {
-    if (!this.prefs.name) this.prefs.name = '';
     UI.showScreen(UI.joinScreen(this, code));
-  }
-  async gotoHost() {
-    if (!this.prefs.name) {
-      // need a name first
-      let name = '';
-      const box = h('div', { class: 'stack' },
-        UI.modalTitle('Your name'),
-        h('input', { maxlength: 12, placeholder: 'Commander', oninput: (e) => (name = e.target.value) }),
-        h('button', { class: 'btn primary', onclick: () => { if (name.trim()) { this.prefs.name = name.trim(); this.savePrefs(); UI.closeModal(); this.gotoHost(); } } }, 'Continue'),
-      );
-      UI.modal(box);
-      return;
-    }
-    UI.showScreen(UI.waitingScreen(this, 'Creating your room…'));
-    try {
-      await this.hostGame();
-    } catch (e) {
-      UI.toast('Could not create room: ' + (e && (e.message || e.type) ? e.message || e.type : e), 5000);
-      this.gotoMenu();
-    }
   }
   joinLink() {
     const u = new URL(location.href);
-    u.search = '?join=' + (this.lobby ? this.lobby.code : '');
+    u.search = '?room=' + (this.room ? this.room.code : '');
     u.hash = '';
     return u.toString();
   }
-  confirmQuit() {
-    const box = h('div', { class: 'stack' },
-      UI.modalTitle('Quit game?'),
-      h('p', {}, this.mode === 'online' ? 'You will leave the online game. Your tank is handed to the computer.' : 'The current game will be lost.'),
-      h('button', { class: 'btn primary', onclick: () => { UI.closeModal(); this.quitToMenu(); } }, 'Quit'),
-      h('button', { class: 'btn', onclick: () => UI.closeModal() }, 'Keep playing'),
-    );
-    UI.modal(box);
+  withName(fn) {
+    if (this.prefs.name) fn(this.prefs.name, this.prefs.color || PLAYER_COLORS[0]);
+    else UI.namePrompt(this, fn);
+  }
+
+  async refreshGameSummaries() {
+    const rows = document.querySelectorAll('#my-games .game-row');
+    if (!rows.length || !this.onlineAvailable()) return;
+    const client = this.getClient();
+    await Promise.all([...rows].map(async (row) => {
+      const code = row.dataset.code;
+      try {
+        const s = await client.summary(code);
+        if (!row.isConnected) return;
+        const status = row.querySelector('.game-status');
+        const pill = row.querySelector('.turn-pill');
+        const g = this.prefs.games[code];
+        if (g) { g.phase = s.phase; g.lastSeen = Math.max(g.lastSeen || 0, s.updatedAt || 0); }
+        if (s.phase === 'lobby') status.textContent = `In the lobby with ${s.players.length} tank${s.players.length === 1 ? '' : 's'}`;
+        else if (s.phase === 'over') status.textContent = `Finished · ${UI.relativeTime(s.updatedAt)}`;
+        else if (s.yourTurn) status.textContent = s.turnPhase === 'shop' ? `Round ${s.round} over, time to shop` : `Round ${s.round}/${s.rounds} · your move`;
+        else status.textContent = `Round ${s.round}/${s.rounds} · waiting for ${s.waitingOn.join(', ') || 'the computer'} · ${UI.relativeTime(s.updatedAt)}`;
+        pill.hidden = !s.yourTurn;
+        row.classList.toggle('your-turn', !!s.yourTurn);
+      } catch (e) {
+        if (!row.isConnected) return;
+        const status = row.querySelector('.game-status');
+        status.textContent = /No such room/.test(e.message) ? 'This room no longer exists' : 'Offline';
+      }
+    }));
+    this.savePrefs();
+  }
+
+  // ------------------------------------------------------------ practice (local)
+  startPractice(name, color, bots) {
+    this.leaveRoomSession();
+    this.mode = 'local';
+    const names = ['Genghis', 'Napoleon', 'Attila', 'Cleo', 'Boudica', 'Hannibal', 'Patton', 'Sun Tzu', 'Rommel'];
+    const players = [{ name, color, type: 'human', owner: null }];
+    bots.forEach((b, i) => {
+      const c = PLAYER_COLORS.filter((x) => x !== color)[i % 9];
+      players.push({ name: names[i % names.length], color: c, type: 'ai', ai: b.ai, owner: null });
+    });
+    this.beginGame(new Game(this.settings(), players, randomSeed()));
+  }
+  canPlayAgain() {
+    return this.mode === 'local';
+  }
+  playAgain() {
+    if (this.mode !== 'local') return;
+    const players = this.game.players.map((p) => ({ name: p.name, type: p.type, ai: p.ai, color: p.color, owner: null }));
+    this.beginGame(new Game(this.settings(), players, randomSeed()));
   }
   quitToMenu() {
     this.clearOverlay();
     this.gotoMenu();
   }
-  canPlayAgain() {
-    return this.mode === 'local' || (this.net && this.net.isHost);
-  }
-  playAgain() {
-    if (this.mode === 'local') {
-      const players = this.game.players.map((p) => ({ name: p.name, type: p.type, ai: p.ai, color: p.color }));
-      this.startLocalGame(players);
-    } else if (this.net && this.net.isHost) {
-      this.lobby.players = this.game.players.map((p) => ({ name: p.name, type: p.type, ai: p.ai, color: p.color, owner: p.owner }));
-      this.game = null;
-      this.startOnlineGame();
-    }
+  confirmQuit() {
+    const online = this.mode === 'online';
+    const box = h('div', { class: 'stack' },
+      UI.modalTitle(online ? 'Leave this game?' : 'Quit game?'),
+      h('p', {}, online ? 'Your tank is handed to the computer so the others can keep playing. You can take it back later from "My games".' : 'The current practice game will be lost.'),
+      h('button', { class: 'btn primary', onclick: () => { UI.closeModal(); if (online) this.handOver(this.myIdx()); this.quitToMenu(); } }, online ? 'Leave and hand over' : 'Quit'),
+      online ? h('button', { class: 'btn', onclick: () => { UI.closeModal(); this.quitToMenu(); } }, 'Just close (I will be back)') : null,
+      h('button', { class: 'btn ghost', onclick: () => UI.closeModal() }, 'Keep playing'),
+    );
+    UI.modal(box);
   }
 
-  // ------------------------------------------------------------ local game
-  startLocalGame(players) {
-    this.teardownNet();
-    this.mode = 'local';
-    this.beginGame(new Game(this.settings(), players.map((p) => ({ ...p, owner: null })), randomSeed()));
-  }
-
-  beginGame(game, { fromSnapshot = false } = {}) {
+  // ------------------------------------------------------------ game lifecycle
+  beginGame(game, { started = false } = {}) {
     this.game = game;
-    if (!fromSnapshot) game.start();
+    if (!started) game.start();
     this.speed = 1;
     this.lastPhase = '';
     this.lastCurrent = -1;
     this.lastHumanTurn = -1;
     this.passPending = false;
     this.shopQueue = [];
+    this.awaitingTurn = -1;
+    this.lastReport = '';
     this.renderer.bgKey = '';
     this.enterGame();
     this.handleEvents(game.takeEvents());
@@ -206,19 +277,23 @@ class App {
     this.canvas.style.height = `${Math.floor(H * scale)}px`;
   }
 
-  // ------------------------------------------------------------ helpers
   isLocalHuman(idx) {
     const p = this.game && this.game.players[idx];
     if (!p || p.type !== 'human') return false;
     return this.mode === 'local' ? true : p.owner === this.myId;
+  }
+  myIdx() {
+    if (!this.game) return -1;
+    const p = this.game.players.find((x) => x.owner === this.myId);
+    return p ? p.idx : -1;
   }
   localHumans() {
     return this.game ? this.game.players.filter((p) => this.isLocalHuman(p.idx)).map((p) => p.idx) : [];
   }
   canAct() {
     const g = this.game;
-    if (!g || g.phase !== 'aim' || !this.isLocalHuman(g.current) || this.passPending) return false;
-    if (this.mode === 'online' && this.awaitingTurn === g.turnNo) return false; // fire sent, waiting for the host's echo
+    if (!g || g.phase !== 'aim' || !this.isLocalHuman(g.current) || this.passPending || this.loading) return false;
+    if (this.mode === 'online' && this.awaitingTurn === g.turnNo) return false;
     return $('screen-game').hidden === false && $('modal').hidden;
   }
   currentIsAI() {
@@ -235,69 +310,59 @@ class App {
   }
 
   // ------------------------------------------------------------ commands
-  /** Route a command from a local human: apply directly, or through the host. */
   issue(cmd) {
     if (this.mode === 'local') return this.game.apply(cmd);
-    if (cmd.type === 'fire' || cmd.type === 'item' || cmd.type === 'move' || cmd.type === 'skip') cmd.turn = this.game.turnNo;
-    if (cmd.type === 'fire') this.awaitingTurn = this.game.turnNo;
-    if (this.net.isHost) {
-      this.inbox.push({ cmd, from: this.myId });
-      return true;
-    }
-    this.net.sendHost({ t: 'cmd', cmd });
+    const g = this.game;
+    if (cmd.type === 'fire' || cmd.type === 'item' || cmd.type === 'move' || cmd.type === 'skip') cmd.turn = g.turnNo;
+    if (cmd.type === 'fire') this.awaitingTurn = g.turnNo;
+    const sum = cmd.type === 'fire' ? g.checksum() : undefined;
+    const code = this.room.code;
+    this.getClient().cmd(code, cmd, sum).then((res) => {
+      if (res && res.entry) this.enqueue(res.entry);
+      else if (res && res.seq) this.enqueue({ seq: res.seq, cmd, sum: sum === undefined ? null : sum });
+    }).catch((e) => {
+      this.awaitingTurn = -1;
+      UI.toast('Could not send your move: ' + e.message, 4000);
+      this.refreshControls(true);
+    });
     return true;
   }
 
-  hostProcessInbox() {
-    if (!this.inbox.length) return;
-    const g = this.game;
-    const keep = [];
-    for (const item of this.inbox) {
-      const cmd = item.cmd;
-      const pl = g.players[cmd.p];
-      const allowed = pl && (item.from === this.myId || pl.owner === item.from);
-      if (!allowed) continue;
-      if (cmd.turn !== undefined && cmd.turn !== g.turnNo) continue; // stale duplicate from an earlier turn
-      const sum = cmd.type === 'fire' ? g.checksum() : undefined;
-      const dbg = sum !== undefined && window.__debugSync ? g.debugState() : undefined;
-      if (g.apply(cmd)) {
-        this.seq++;
-        this.net.broadcast({ t: 'cmd', seq: this.seq, cmd, sum, dbg });
-      } else if (!g.isIdle()) {
-        keep.push(item); // not applicable yet; retry when the sim settles
-      }
-    }
-    this.inbox = keep;
+  enqueue(entry) {
+    if (!entry || typeof entry.seq !== 'number' || entry.seq < this.nextSeq) return;
+    if (this.pending.some((p) => p.seq === entry.seq)) return;
+    this.pending.push(entry);
+    this.pending.sort((a, b) => a.seq - b.seq);
   }
 
-  clientApplyPending() {
+  applyPending() {
     const g = this.game;
-    if (this.resyncing) return;
     while (this.pending.length && this.pending[0].seq === this.nextSeq) {
+      if (!g.awaitingInput()) break;
       const item = this.pending[0];
-      // commands only apply once our own simulation has settled at the same point
-      if (!g.isIdle()) break;
-      if (item.sum !== undefined && g.checksum() !== item.sum) {
-        if (item.dbg) console.warn('desync detail', JSON.stringify({ mine: g.debugState(), host: item.dbg, phase: g.phase, current: g.current, seq: item.seq }));
-        this.requestResync('checksum mismatch');
-        return;
-      }
-      if (g.apply(item.cmd)) {
+      const cmd = item.cmd;
+      if (cmd.turn !== undefined && cmd.turn !== g.turnNo) {
+        // stale duplicate of an earlier turn: every phone skips it identically
         this.pending.shift();
         this.nextSeq++;
-      } else {
-        this.requestResync('command rejected');
-        return;
+        continue;
       }
+      if (typeof item.sum === 'number' && g.checksum() !== item.sum) {
+        if (this.reloadedAtSeq !== item.seq) {
+          this.reloadedAtSeq = item.seq;
+          console.warn('checksum mismatch at seq', item.seq, 'reloading from the server log');
+          UI.toast('Re-syncing with the server…', 2500);
+          this.openRoom(this.room.code);
+          return;
+        }
+        console.warn('checksum still differs after reload at seq', item.seq, '(sender diverged); continuing');
+      }
+      if (!g.apply(cmd)) console.warn('command rejected by the simulation, skipped', cmd);
+      this.pending.shift();
+      this.nextSeq++;
+      this.room.lastSeq = item.seq;
+      if (cmd.type === 'fire') this.awaitingTurn = -1;
     }
-  }
-
-  requestResync(reason) {
-    if (this.resyncing) return;
-    this.resyncing = true;
-    console.warn('desync:', reason);
-    UI.toast('Re-syncing with host…', 3000);
-    this.net.sendHost({ t: 'snap?' });
   }
 
   // ------------------------------------------------------------ loop
@@ -305,16 +370,12 @@ class App {
     requestAnimationFrame((t) => this.loop(t));
     const dt = Math.min(120, now - this.last);
     this.last = now;
-    if (!this.game) return;
+    if (!this.game || this.loading) return;
     const g = this.game;
-    if (this.mode === 'online' && this.net && this.net.isHost) this.hostProcessJoins();
     this.acc += dt * this.effectiveSpeed();
     let steps = 0;
     while (this.acc >= TICK_MS && steps < 12) {
-      if (this.mode === 'online') {
-        if (this.net.isHost) this.hostProcessInbox();
-        else this.clientApplyPending();
-      }
+      if (this.mode === 'online') this.applyPending();
       g.step();
       this.handleEvents(g.takeEvents());
       this.checkTransitions();
@@ -348,7 +409,7 @@ class App {
         case 'deflect': snd.bounce(); break;
         case 'battery': snd.cash(); break;
         case 'roundOver': if (e.winner >= 0 && this.isLocalHuman(e.winner)) snd.win(); else if (e.winner >= 0) snd.lose(); break;
-        case 'aiTakeover': UI.toast(`${g.players[e.p].name} is now played by the computer`); break;
+        case 'aiTakeover': UI.toast(`${g.players[e.p].name}'s tank is now driven by the computer`); break;
         case 'takeover': UI.toast(`${g.players[e.p].name} is back`); break;
         case 'shopDone': this.updateWaitingShop(); break;
       }
@@ -370,34 +431,19 @@ class App {
     else if (phase === 'roundOver') this.onRoundOver();
     else if (phase === 'shop') this.onShop();
     else if (phase === 'gameOver') this.onGameOver();
+    if (this.mode === 'online' && g.awaitingInput()) this.reportTurn();
   }
 
-  onNewTurn(prevPhase) {
+  onNewTurn() {
     const g = this.game;
     if ($('screen-game').hidden) this.enterGame();
     this.clearOverlay();
-    const pl = g.players[g.current];
-    if (prevPhase !== 'aim' || true) {
-      if (this.isLocalHuman(g.current)) {
-        this.sound.turn();
-        const humans = this.localHumans();
-        if (this.mode === 'local' && humans.length >= 2 && this.lastHumanTurn !== g.current) this.showPassOverlay(pl);
-        this.lastHumanTurn = g.current;
-        this.showAim(1200);
-      }
+    if (this.isLocalHuman(g.current)) {
+      this.sound.turn();
+      this.lastHumanTurn = g.current;
+      this.showAim(1200);
     }
     this.refreshControls(true);
-  }
-
-  showPassOverlay(pl) {
-    this.passPending = true;
-    const box = h('div', { class: 'banner' },
-      h('h2', { style: { color: pl.color } }, `PASS TO ${pl.name.toUpperCase()}`),
-      h('p', {}, `It's your turn, ${pl.name}.`),
-      h('button', { class: 'btn primary', onclick: () => { this.passPending = false; this.clearOverlay(); this.refreshControls(true); this.sound.unlock(); } }, "I'm ready"),
-    );
-    this.overlay.innerHTML = '';
-    this.overlay.appendChild(box);
   }
 
   clearOverlay() {
@@ -439,9 +485,8 @@ class App {
     }
     UI.showScreen(UI.shopScreen(this, idx, (buys) => {
       this.issue({ type: 'shop', p: idx, buys });
-      // local games apply immediately and may already have started the next round
       if (this.game.phase !== 'shop') this.enterGame();
-      else this.nextShop();
+      else this.showWaitingShop();
     }));
   }
 
@@ -449,7 +494,7 @@ class App {
     const g = this.game;
     if (g.phase !== 'shop') { this.enterGame(); return; }
     this.waitList = h('div', { class: 'stack' });
-    UI.showScreen(UI.waitingScreen(this, 'Waiting for the other players to finish shopping…', this.waitList));
+    UI.showScreen(UI.waitingScreen(this, 'Waiting for the other players to finish shopping. You can close the app; the game will be here when they are done.', this.waitList));
     this.updateWaitingShop();
   }
 
@@ -464,11 +509,12 @@ class App {
 
   onGameOver() {
     this.clearOverlay();
+    if (this.mode === 'online' && this.room) this.rememberGame({ ...this.room.view, phase: 'over' });
     UI.showScreen(UI.resultsScreen(this, { final: true }));
   }
 
   // ------------------------------------------------------------ controls
-  refreshControls(force = false) {
+  refreshControls() {
     const g = this.game;
     if (!g || $('screen-game').hidden) return;
     const cur = g.current;
@@ -481,9 +527,7 @@ class App {
     const wait = $('ctl-wait');
     let waitText = '';
     if (!mine) {
-      if (this.passPending) waitText = '';
-      else if (g.phase === 'aim') waitText = pl.type === 'ai' ? `${pl.name} is thinking…` : `Waiting for ${pl.name}…`;
-      else if (g.phase === 'action') waitText = '';
+      if (g.phase === 'aim') waitText = pl.type === 'ai' ? `${pl.name} is thinking…` : this.awaitingTurn === g.turnNo && this.isLocalHuman(cur) ? 'Sending…' : `Waiting for ${pl.name}…`;
       else if (g.phase === 'roundOver') waitText = 'Round over';
     }
     const showWait = !mine && waitText !== '';
@@ -491,7 +535,6 @@ class App {
     const wt = $('ctl-wait-text');
     if (wt.textContent !== waitText) wt.textContent = waitText;
     const set = (id, v) => { const el = $(id); if (el.textContent !== String(v)) el.textContent = v; };
-    // status line shows the local player's tank when it's not their turn? keep it on the current player
     const nameEl = $('ctl-name');
     set('ctl-name', pl.name);
     if (nameEl.style.color !== pl.color) nameEl.style.color = pl.color;
@@ -535,13 +578,11 @@ class App {
     if (weapon) t.weapon = weapon;
     this.sound.click();
     this.refreshControls();
-    if (this.mode === 'online') {
+    if (this.mode === 'online' && this.client) {
       const now = performance.now();
-      if (now - this.lastAimSent > 120 || weapon) {
+      if (now - this.lastAimSent > 150 || weapon) {
         this.lastAimSent = now;
-        const msg = { t: 'aim', p: g.current, angle, power, weapon: t.weapon };
-        if (this.net.isHost) this.net.broadcast(msg);
-        else this.net.sendHost(msg);
+        this.client.send({ t: 'aim', p: g.current, angle, power, weapon: t.weapon });
       }
     }
   }
@@ -636,37 +677,58 @@ class App {
   openMenu() {
     if (!this.game) return;
     const p = this.prefs;
+    const g = this.game;
     const tog = (label, key, after) => h('button', { class: 'list-item', onclick: (e) => { p[key] = !p[key]; this.savePrefs(); this.applyPrefs(); e.currentTarget.querySelector('.cnt').textContent = p[key] ? 'on' : 'off'; if (after) after(); } },
       h('div', { class: 'name' }, label), h('div', { class: 'cnt' }, p[key] ? 'on' : 'off'));
+    const online = this.mode === 'online';
+    const isHost = online && this.room && this.room.view.hostId === this.myId;
+    const handOverRows = [];
+    if (isHost) {
+      for (const pl of g.players) {
+        if (pl.type === 'human' && pl.owner !== this.myId) {
+          handOverRows.push(h('button', { class: 'list-item', onclick: () => { UI.closeModal(); this.handOver(pl.idx); } },
+            h('div', {}, h('div', { class: 'name' }, `Hand ${pl.name}'s tank to the computer`), h('div', { class: 'desc' }, 'For players who stopped responding. They can take it back later.')), h('div', { class: 'cnt' }, '›')));
+        }
+      }
+    }
     const box = h('div', {},
       UI.modalTitle('Menu'),
       h('button', { class: 'btn primary', style: { marginBottom: '10px' }, onclick: () => UI.closeModal() }, 'Resume'),
+      online && this.canNotify() && !this.notificationsOn() ? h('button', { class: 'list-item', onclick: () => { UI.closeModal(); this.enableNotifications(); } }, h('div', { class: 'name' }, '🔔 Notify me when it is my turn'), h('div', { class: 'cnt' }, '›')) : null,
       tog('Sound', 'sound', () => this.sound.unlock()),
       tog('Shot trails', 'trails'),
       tog('Name labels', 'labels'),
       tog('Fast AI turns', 'fastAI'),
       tog('Drag on field to aim', 'dragAim'),
       h('button', { class: 'list-item', onclick: () => { UI.closeModal(); UI.showScreen(UI.helpScreen(this, () => this.enterGame())); } }, h('div', { class: 'name' }, 'How to play'), h('div', { class: 'cnt' }, '›')),
-      this.mode === 'online' ? h('button', { class: 'list-item', onclick: () => { UI.closeModal(); this.openChat(); } }, h('div', { class: 'name' }, 'Chat'), h('div', { class: 'cnt' }, '›')) : null,
-      this.mode === 'online' && this.net.isHost && this.canAct() === false ? h('button', { class: 'list-item', onclick: () => { UI.closeModal(); this.hostSkipTurn(); } }, h('div', { class: 'name' }, 'Skip the current player (host)'), h('div', { class: 'cnt' }, '›')) : null,
-      h('button', { class: 'list-item', onclick: () => { UI.closeModal(); this.confirmQuit(); } }, h('div', { class: 'name', style: { color: 'var(--red)' } }, 'Quit to menu'), h('div', { class: 'cnt' }, '›')),
+      online ? h('button', { class: 'list-item', onclick: () => { UI.closeModal(); this.openChat(); } }, h('div', { class: 'name' }, 'Chat'), h('div', { class: 'cnt' }, '›')) : null,
+      online ? h('button', { class: 'list-item', onclick: () => { UI.closeModal(); this.shareInvite(); } }, h('div', { class: 'name' }, `Room ${this.room.code}`), h('div', { class: 'cnt' }, 'share')) : null,
+      ...handOverRows,
+      h('button', { class: 'list-item', onclick: () => { UI.closeModal(); if (online) this.quitToMenu(); else this.confirmQuit(); } }, h('div', { class: 'name' }, online ? 'Back to menu (game stays saved)' : 'Quit to menu'), h('div', { class: 'cnt' }, '›')),
+      online ? h('button', { class: 'list-item', onclick: () => { UI.closeModal(); this.confirmQuit(); } }, h('div', { class: 'name', style: { color: 'var(--red)' } }, 'Leave this game for good'), h('div', { class: 'cnt' }, '›')) : null,
     );
     UI.modal(box);
   }
 
-  hostSkipTurn() {
-    const g = this.game;
-    if (g.phase === 'aim' && g.players[g.current].type === 'human') this.inbox.push({ cmd: { type: 'skip', p: g.current }, from: this.myId });
+  shareInvite() {
+    const link = this.joinLink();
+    if (navigator.share) navigator.share({ title: 'Scorched Earth', text: `Join my Scorched Earth game! Room code ${this.room.code}`, url: link }).catch(() => {});
+    else if (navigator.clipboard) navigator.clipboard.writeText(link).then(() => UI.toast('Link copied'));
+  }
+
+  handOver(idx) {
+    if (idx < 0 || this.mode !== 'online') return;
+    this.issue({ type: 'aiTakeover', p: idx, level: 'poolshark' });
   }
 
   openChat() {
     if (this.mode !== 'online') return;
     let text = '';
     const log = h('div', { class: 'chat-log' }, ...this.chatLog.map((m) => h('div', {}, h('b', { style: { color: m.color } }, m.from + ': '), m.text)));
-    const input = h('input', { placeholder: 'Say something…', maxlength: 120, oninput: (e) => (text = e.target.value) });
+    const input = h('input', { id: 'chat-input', placeholder: 'Say something…', maxlength: 160, oninput: (e) => (text = e.target.value) });
     const send = () => {
       if (!text.trim()) return;
-      this.sendChat(text.trim());
+      this.client.send({ t: 'chat', text: text.trim() });
       text = '';
       input.value = '';
     };
@@ -675,16 +737,8 @@ class App {
     log.scrollTop = log.scrollHeight;
     setTimeout(() => input.focus(), 50);
   }
-
-  sendChat(text) {
-    const me = this.game ? this.game.players.find((p) => p.owner === this.myId) : null;
-    const msg = { t: 'chat', from: this.prefs.name || (me && me.name) || 'Someone', color: me ? me.color : '#fff', text };
-    this.onChat(msg);
-    if (this.net.isHost) this.net.broadcast(msg);
-    else this.net.sendHost(msg);
-  }
   onChat(msg) {
-    this.chatLog.push({ from: String(msg.from).slice(0, 12), color: msg.color, text: String(msg.text).slice(0, 120) });
+    this.chatLog.push({ from: String(msg.from).slice(0, 12), color: msg.color, text: String(msg.text).slice(0, 160) });
     if (this.chatLog.length > 100) this.chatLog.shift();
     UI.toast(`${msg.from}: ${msg.text}`, 3500);
     const log = document.querySelector('.chat-log');
@@ -694,301 +748,302 @@ class App {
     }
   }
 
-  // ------------------------------------------------------------ online
-  teardownNet() {
-    if (this.net) {
-      if (this.net.isHost && this.lobby) this.net.broadcast({ t: 'end' });
-      this.net.close();
-    }
-    this.net = null;
+  // ------------------------------------------------------------ online rooms
+  leaveRoomSession() {
+    if (this.client) this.client.disconnect();
+    this.room = null;
     this.lobby = null;
     this.myId = null;
     this.pending = [];
-    this.inbox = [];
-    this.pendingJoins = [];
-    this.dropped.clear();
-    this.seq = 0;
     this.nextSeq = 1;
-    this.resyncing = false;
-    this.awaitingTurn = -1;
+    this.reloadedAtSeq = -1;
     this.chatLog = [];
+    this.loading = false;
+    this.mode = 'local';
   }
 
-  async hostGame() {
-    this.teardownNet();
-    this.mode = 'online';
-    this.net = new Net(this.prefs.peer);
-    let code = makeRoomCode();
-    let tries = 0;
-    for (;;) {
+  newGame() {
+    this.withName(async (name, color) => {
+      UI.showScreen(UI.waitingScreen(this, 'Creating your room…'));
       try {
-        await this.net.host(code);
-        break;
+        const view = await this.getClient().create({ name, color, settings: this.settings() });
+        this.rememberGame(view);
+        this.openLobby(view);
       } catch (e) {
-        if (e && e.type === 'unavailable-id' && tries++ < 3) { code = makeRoomCode(); continue; }
-        throw e;
-      }
-    }
-    this.myId = this.net.id;
-    this.lobby = {
-      code,
-      players: [{ name: this.prefs.name, color: PLAYER_COLORS[0], type: 'human', owner: this.myId }],
-      settings: { rounds: this.settings().rounds },
-    };
-    this.wireNet();
-    UI.showScreen(UI.lobbyScreen(this));
-  }
-
-  async joinGame(code, name) {
-    this.teardownNet();
-    this.mode = 'online';
-    this.net = new Net(this.prefs.peer);
-    await this.net.join(code);
-    this.myId = this.net.id;
-    this.lobby = { code, players: [], settings: { rounds: 1 } };
-    this.wireNet();
-    this.net.sendHost({ t: 'join', name });
-    UI.showScreen(UI.waitingScreen(this, 'Joining the room…'));
-  }
-
-  wireNet() {
-    const net = this.net;
-    net.on('message', (conn, msg) => {
-      try {
-        if (net.isHost) this.hostMessage(conn, msg);
-        else this.clientMessage(msg);
-      } catch (e) {
-        console.error('net message error', e);
-      }
-    });
-    net.on('close', (conn) => {
-      if (net.isHost) this.hostPeerLeft(conn.peer);
-      else this.hostGone();
-    });
-    net.on('error', (e) => console.warn('net error', e));
-  }
-
-  broadcastLobby() {
-    this.net.broadcast({ t: 'lobby', players: this.lobby.players, settings: this.lobby.settings });
-    if (!this.game && document.querySelector('.code')) UI.showScreen(UI.lobbyScreen(this));
-  }
-
-  hostMessage(conn, msg) {
-    const L = this.lobby;
-    switch (msg.t) {
-      case 'join': {
-        const name = String(msg.name || 'Player').slice(0, 12);
-        if (this.game) {
-          // rejoin?
-          const idx = this.dropped.get(name);
-          if (idx != null) {
-            this.dropped.delete(name);
-            this.pendingJoins.push({ conn, idx, name });
-            this.net.send(conn, { t: 'welcome', you: conn.peer, lobby: { code: L.code, players: L.players, settings: L.settings } });
-          } else {
-            this.net.send(conn, { t: 'full', reason: 'This game has already started.' });
-          }
-          return;
-        }
-        if (L.players.length >= 10) { this.net.send(conn, { t: 'full', reason: 'The room is full (10 tanks).' }); return; }
-        const used = new Set(L.players.map((p) => p.color));
-        const color = PLAYER_COLORS.find((c) => !used.has(c)) || PLAYER_COLORS[L.players.length % PLAYER_COLORS.length];
-        // unique name
-        let n = name, k = 2;
-        while (L.players.some((p) => p.name === n)) n = `${name.slice(0, 10)} ${k++}`;
-        L.players.push({ name: n, color, type: 'human', owner: conn.peer });
-        this.net.send(conn, { t: 'welcome', you: conn.peer, lobby: { code: L.code, players: L.players, settings: L.settings } });
-        this.broadcastLobby();
-        UI.toast(`${n} joined`);
-        break;
-      }
-      case 'lobbyUpdate': {
-        const p = L.players[msg.idx];
-        if (p && p.owner === conn.peer && !this.game) {
-          if (msg.color && PLAYER_COLORS.includes(msg.color)) p.color = msg.color;
-          this.broadcastLobby();
-        }
-        break;
-      }
-      case 'cmd':
-        if (this.game && msg.cmd) this.inbox.push({ cmd: msg.cmd, from: conn.peer });
-        break;
-      case 'aim':
-        if (this.game) {
-          const pl = this.game.players[msg.p];
-          if (pl && pl.owner === conn.peer) {
-            this.game.apply({ type: 'aim', p: msg.p, angle: msg.angle, power: msg.power, weapon: msg.weapon });
-            this.net.broadcast(msg, conn);
-          }
-        }
-        break;
-      case 'snap?':
-        this.pendingJoins.push({ conn, snapshotOnly: true });
-        break;
-      case 'chat':
-        this.onChat(msg);
-        this.net.broadcast(msg, conn);
-        break;
-    }
-  }
-
-  hostProcessJoins() {
-    if (!this.pendingJoins.length || !this.game || !this.game.isIdle()) return;
-    const g = this.game;
-    const joins = this.pendingJoins;
-    this.pendingJoins = [];
-    for (const j of joins) {
-      if (!j.snapshotOnly) {
-        const cmd = { type: 'takeover', p: j.idx, owner: j.conn.peer };
-        if (g.apply(cmd)) {
-          this.seq++;
-          this.net.broadcast({ t: 'cmd', seq: this.seq, cmd }, j.conn);
-        }
-      }
-      const snap = g.snapshot();
-      this.net.send(j.conn, { t: 'start', seed: g.seed, settings: g.settings, players: g.players, snapshot: snap, seq: this.seq });
-    }
-  }
-
-  hostPeerLeft(peerId) {
-    if (!this.game) {
-      const L = this.lobby;
-      const i = L.players.findIndex((p) => p.owner === peerId);
-      if (i >= 0) {
-        UI.toast(`${L.players[i].name} left`);
-        L.players.splice(i, 1);
-        this.broadcastLobby();
-      }
-      return;
-    }
-    for (const p of this.game.players) {
-      if (p.owner === peerId && p.type === 'human') {
-        this.dropped.set(p.name, p.idx);
-        this.inbox.push({ cmd: { type: 'aiTakeover', p: p.idx, level: 'poolshark' }, from: this.myId });
-      }
-    }
-  }
-
-  lobbyUpdate({ idx, color, ai }) {
-    const L = this.lobby;
-    const p = L.players[idx];
-    if (!p) return;
-    if (this.net.isHost) {
-      if (color) p.color = color;
-      if (ai) p.ai = ai;
-      this.broadcastLobby();
-    } else if (p.owner === this.myId && color) {
-      this.net.sendHost({ t: 'lobbyUpdate', idx, color });
-    }
-  }
-  lobbyRemove(idx) {
-    const L = this.lobby;
-    const p = L.players[idx];
-    if (!p || !this.net.isHost) return;
-    if (p.owner && p.owner !== this.myId) {
-      const c = this.net.conns.get(p.owner);
-      this.net.send(c, { t: 'full', reason: 'The host removed you from the room.' });
-      setTimeout(() => c && c.close(), 200);
-    }
-    L.players.splice(idx, 1);
-    this.broadcastLobby();
-  }
-  lobbyAddAI() {
-    const L = this.lobby;
-    const used = new Set(L.players.map((p) => p.color));
-    const names = ['Genghis', 'Napoleon', 'Attila', 'Cleo', 'Boudica', 'Hannibal', 'Patton', 'Sun Tzu', 'Rommel', 'Zhukov'];
-    const name = names.find((n) => !L.players.some((p) => p.name === n)) || `Bot ${L.players.length}`;
-    L.players.push({ name, color: PLAYER_COLORS.find((c) => !used.has(c)) || PLAYER_COLORS[L.players.length % 10], type: 'ai', ai: 'poolshark' });
-    this.broadcastLobby();
-  }
-  lobbySettingsChanged() {
-    this.broadcastLobby();
-  }
-  leaveLobby() {
-    this.gotoMenu();
-  }
-
-  startOnlineGame() {
-    const L = this.lobby;
-    const seed = randomSeed();
-    const settings = { ...this.settings(), rounds: L.settings.rounds };
-    const players = L.players.map((p) => ({ name: p.name, color: p.color, type: p.type, ai: p.ai, owner: p.type === 'human' ? p.owner : null }));
-    this.seq = 0;
-    this.inbox = [];
-    this.pendingJoins = [];
-    this.net.broadcast({ t: 'start', seed, settings, players, seq: 0 });
-    this.beginGame(new Game(settings, players, seed));
-  }
-
-  clientMessage(msg) {
-    switch (msg.t) {
-      case 'welcome':
-        this.lobby.code = msg.lobby.code;
-        this.lobby.players = msg.lobby.players;
-        this.lobby.settings = msg.lobby.settings;
-        if (!this.game) UI.showScreen(UI.lobbyScreen(this));
-        break;
-      case 'lobby':
-        if (!this.lobby) return;
-        this.lobby.players = msg.players;
-        this.lobby.settings = msg.settings;
-        if (!this.game) UI.showScreen(UI.lobbyScreen(this));
-        break;
-      case 'full':
-        UI.toast(msg.reason || 'Could not join.', 5000);
+        UI.toast('Could not create a room: ' + e.message, 5000);
         this.gotoMenu();
-        break;
-      case 'start': {
-        this.pending = this.pending.filter((c) => c.seq > (msg.seq || 0));
-        this.nextSeq = (msg.seq || 0) + 1;
-        this.resyncing = false;
-        if (msg.snapshot) {
-          const g = Game.fromSnapshot(msg.snapshot);
-          this.beginGame(g, { fromSnapshot: true });
-        } else {
-          this.beginGame(new Game(msg.settings, msg.players, msg.seed));
-        }
-        break;
       }
-      case 'cmd':
-        if (msg.seq < this.nextSeq) return;
-        this.pending.push(msg);
-        this.pending.sort((a, b) => a.seq - b.seq);
-        break;
-      case 'aim':
-        if (this.game) this.game.apply({ type: 'aim', p: msg.p, angle: msg.angle, power: msg.power, weapon: msg.weapon });
-        break;
-      case 'chat':
-        this.onChat(msg);
-        break;
-      case 'end':
-        this.hostGone();
-        break;
-    }
+    });
   }
 
-  hostGone() {
-    if (this.mode !== 'online') return;
-    if (!this.game || this.game.phase === 'gameOver') {
-      UI.toast('The host left the room.', 4000);
+  /** Arrive via link or code: join if new, otherwise just open. */
+  joinFlow(code) {
+    code = normalizeCode(code);
+    if (this.prefs.games[code]) return this.openRoom(code);
+    this.withName(async (name, color) => {
+      UI.showScreen(UI.waitingScreen(this, `Joining room ${code}…`));
+      try {
+        await this.joinGame(code, name, color);
+      } catch (e) {
+        UI.toast('Could not join: ' + e.message, 5000);
+        this.gotoJoin(code);
+      }
+    });
+  }
+
+  async joinGame(code, name, color) {
+    code = normalizeCode(code);
+    const view = await this.getClient().join(code, { name, color: color || this.prefs.color });
+    this.rememberGame(view);
+    if (view.phase === 'lobby') this.openLobby(view);
+    else await this.openRoom(code);
+  }
+
+  async openRoom(code) {
+    code = normalizeCode(code);
+    const client = this.getClient();
+    const screen = UI.loadingScreen(this, 'Fetching the game…');
+    UI.showScreen(screen);
+    let data;
+    try {
+      data = await client.state(code, 0);
+    } catch (e) {
+      UI.toast(e.message, 5000);
+      if (/No such room/.test(e.message)) { delete this.prefs.games[code]; this.savePrefs(); }
       this.gotoMenu();
       return;
     }
-    // carry on offline: the computer takes over everyone who isn't on this device
-    UI.toast('Lost the host. Continuing offline with AI opponents.', 5000);
-    const g = this.game;
-    for (const p of g.players) {
-      if (p.type === 'human' && p.owner !== this.myId) g.apply({ type: 'aiTakeover', p: p.idx, level: 'poolshark' });
-      if (p.owner === this.myId) p.owner = null;
+    const view = data.room;
+    if (!view.you) {
+      // this phone is not a member yet (someone shared a code for an open lobby)
+      this.leaveRoomSession();
+      this.withName((name, color) => this.joinGame(code, name, color).catch((e) => { UI.toast('Could not join: ' + e.message, 5000); this.gotoMenu(); }));
+      return;
     }
-    this.net.close();
-    this.net = null;
-    this.mode = 'local';
+    this.rememberGame(view);
+    if (view.phase === 'lobby') {
+      this.openLobby(view);
+      return;
+    }
+    await this.loadGame(view, data.cmds, screen);
+  }
+
+  openLobby(view) {
+    this.leaveRoomSession();
+    this.mode = 'online';
+    this.myId = view.you;
+    this.room = { code: view.code, view, lastSeq: 0 };
+    this.lobby = { code: view.code, players: view.players, settings: view.settings, hostId: view.hostId };
+    this.connectRoom();
+    UI.showScreen(UI.lobbyScreen(this));
+    this.maybeSubscribePush();
+  }
+
+  connectRoom() {
+    const code = this.room.code;
+    this.getClient().connect(code, {
+      open: () => this.catchUp(),
+      message: (m) => this.onRoomMessage(m),
+    });
+  }
+
+  async catchUp() {
+    if (!this.room || !this.client) return;
+    const code = this.room.code;
+    try {
+      const data = await this.client.state(code, this.game ? this.room.lastSeq : 0);
+      if (!this.room || this.room.code !== code) return;
+      const view = data.room;
+      if (this.lobby && view.phase !== 'lobby' && !this.game && !this.loading) {
+        await this.loadGame(view, data.cmds);
+        return;
+      }
+      if (this.lobby && view.phase === 'lobby') {
+        this.lobby.players = view.players;
+        this.lobby.settings = view.settings;
+        this.lobby.hostId = view.hostId;
+        this.room.view = view;
+        if (document.querySelector('.code')) UI.showScreen(UI.lobbyScreen(this));
+      }
+      if (this.game) for (const c of data.cmds) this.enqueue(c);
+    } catch (e) {
+      console.warn('catch-up failed', e);
+    }
+  }
+
+  onRoomMessage(m) {
+    switch (m.t) {
+      case 'lobby':
+        if (!this.lobby) return;
+        this.lobby.players = m.players;
+        this.lobby.settings = m.settings;
+        if (m.hostId) this.lobby.hostId = m.hostId;
+        this.room.view = { ...this.room.view, players: m.players, settings: m.settings, hostId: this.lobby.hostId };
+        if (document.querySelector('.code')) UI.showScreen(UI.lobbyScreen(this));
+        break;
+      case 'start':
+        if (this.game && this.game.seed === m.room.seed) return;
+        if (!this.loading) this.loadGame({ ...m.room, you: this.myId }, []);
+        break;
+      case 'cmd':
+        if (this.game) this.enqueue(m);
+        else if (this.loading) this.enqueue(m);
+        break;
+      case 'aim':
+        if (this.game && !this.isLocalHuman(m.p)) this.game.apply({ type: 'aim', p: m.p, angle: m.angle, power: m.power, weapon: m.weapon });
+        break;
+      case 'chat':
+        this.onChat(m);
+        break;
+      case 'closed':
+        UI.toast(m.reason || 'The room was closed.', 4000);
+        if (this.room) { delete this.prefs.games[this.room.code]; this.savePrefs(); }
+        this.gotoMenu();
+        break;
+    }
+  }
+
+  /** Build the game from the room's seed and replay its command log. */
+  async loadGame(view, cmds, screen) {
+    if (!screen || !screen.isConnected) {
+      screen = UI.loadingScreen(this, 'Replaying the game so far…');
+      UI.showScreen(screen);
+    } else screen.setText('Replaying the game so far…');
+    const wasConnected = this.client && this.client.wsCode === view.code;
+    if (!wasConnected) this.leaveRoomSession();
+    this.mode = 'online';
+    this.loading = true;
+    this.myId = view.you || this.myId;
+    this.room = { code: view.code, view, lastSeq: 0 };
+    this.lobby = null;
     this.pending = [];
-    $('controls').querySelector('[data-act="chat"]').hidden = true;
-    if (g.phase === 'shop') {
-      this.shopQueue = this.localHumans().filter((i) => !g.shopDone[i]);
-      this.nextShop();
+    this.nextSeq = 1;
+    // build from the roster as it was when the game started; hand-overs are replayed as commands
+    const roster = view.startPlayers || view.players;
+    const players = roster.map((p) => ({ name: p.name, color: p.color, type: p.type, ai: p.ai || 'poolshark', owner: p.owner }));
+    const game = new Game(view.settings, players, view.seed);
+    game.start();
+    game.takeEvents();
+    let lastSeq = 0;
+    const total = Math.max(1, cmds.length);
+    let sinceYield = 0;
+    const yieldNow = async (i) => { screen.setProgress(i / total); await new Promise((r) => setTimeout(r, 0)); };
+    const settle = async (i) => {
+      while (!game.awaitingInput()) {
+        game.step();
+        game.events.length = 0;
+        if (++sinceYield >= 3000) { sinceYield = 0; await yieldNow(i); }
+      }
+    };
+    for (let i = 0; i < cmds.length; i++) {
+      const entry = cmds[i];
+      await settle(i);
+      const cmd = entry.cmd;
+      if (cmd.turn !== undefined && cmd.turn !== game.turnNo) { lastSeq = entry.seq; continue; }
+      if (!game.apply(cmd)) console.warn('replay: command rejected', entry);
+      lastSeq = entry.seq;
+    }
+    await settle(cmds.length);
+    game.takeEvents();
+    if (!this.room || this.room.code !== view.code) return; // user navigated away meanwhile
+    this.room.lastSeq = lastSeq;
+    this.nextSeq = lastSeq + 1;
+    this.pending = this.pending.filter((p) => p.seq > lastSeq);
+    this.loading = false;
+    if (!wasConnected) this.connectRoom();
+    this.rememberGame(view);
+    this.beginGame(game, { started: true });
+    this.maybeSubscribePush();
+    this.offerTakeBack();
+  }
+
+  offerTakeBack() {
+    const g = this.game;
+    const mine = g.players.find((p) => p.owner === this.myId);
+    if (mine || !this.room) return;
+    const orig = this.room.view.players.find((p) => p.id === this.myId);
+    if (!orig || orig.type !== 'ai' || !g.tanks[orig.idx]) return;
+    const box = h('div', { class: 'stack' },
+      UI.modalTitle('Welcome back'),
+      h('p', {}, `Your tank ${g.tanks[orig.idx].alive ? 'is being driven by the computer' : 'was driven by the computer and is out for this round'}. Take it back?`),
+      h('button', { class: 'btn primary', onclick: () => { UI.closeModal(); this.issue({ type: 'takeover', p: orig.idx }); } }, 'Take my tank back'),
+      h('button', { class: 'btn', onclick: () => UI.closeModal() }, 'Just watch'),
+    );
+    UI.modal(box);
+  }
+
+  /** Tell the server where the game stands so it can notify whoever is up. */
+  reportTurn() {
+    const g = this.game;
+    if (!this.room || !this.client || this.loading) return;
+    const hint = { phase: g.phase, current: g.phase === 'aim' ? g.current : -1, round: g.round, seq: this.room.lastSeq, done: g.phase === 'shop' ? g.shopDoneList() : [] };
+    const key = JSON.stringify(hint);
+    if (key === this.lastReport) return;
+    this.lastReport = key;
+    this.client.turn(this.room.code, hint).catch(() => {});
+    const gm = this.prefs.games[this.room.code];
+    if (gm) { gm.phase = g.phase === 'gameOver' ? 'over' : 'playing'; gm.lastSeen = Date.now(); this.savePrefs(); }
+  }
+
+  lobbyUpdate({ idx, color, ai, name }) {
+    this.getClient().lobby(this.room.code, { op: 'update', idx, color, ai, name }).catch((e) => UI.toast(e.message, 3000));
+  }
+  lobbyRemove(idx) {
+    this.getClient().lobby(this.room.code, { op: 'remove', idx }).catch((e) => UI.toast(e.message, 3000));
+  }
+  lobbyAddAI() {
+    this.getClient().lobby(this.room.code, { op: 'addAI', ai: 'poolshark' }).catch((e) => UI.toast(e.message, 3000));
+  }
+  lobbySettings(settings) {
+    this.getClient().lobby(this.room.code, { op: 'settings', settings }).catch((e) => UI.toast(e.message, 3000));
+  }
+  leaveLobby() {
+    const code = this.room && this.room.code;
+    if (code) {
+      this.getClient().leave(code).catch(() => {});
+      delete this.prefs.games[code];
+      this.savePrefs();
+    }
+    this.gotoMenu();
+  }
+  async startOnlineGame() {
+    try {
+      const view = await this.getClient().start(this.room.code, { seed: randomSeed(), settings: this.settings() });
+      if (!this.game) this.loadGame(view, []);
+    } catch (e) {
+      UI.toast(e.message, 4000);
+    }
+  }
+
+  // ------------------------------------------------------------ notifications
+  canNotify() {
+    return this.mode === 'online' && !!this.room && !!this.room.view.pushConfigured && 'Notification' in window && 'PushManager' in window && Notification.permission !== 'denied';
+  }
+  notificationsOn() {
+    return this.prefs.notify && 'Notification' in window && Notification.permission === 'granted';
+  }
+  async enableNotifications() {
+    try {
+      const perm = await Notification.requestPermission();
+      if (perm !== 'granted') { UI.toast('Notifications are blocked for this site.', 3000); return; }
+      this.prefs.notify = true;
+      this.savePrefs();
+      await this.maybeSubscribePush();
+      UI.toast('You will be notified when it is your turn.', 3000);
+      if (document.querySelector('.code')) UI.showScreen(UI.lobbyScreen(this));
+    } catch (e) {
+      UI.toast('Could not enable notifications: ' + e.message, 4000);
+    }
+  }
+  async maybeSubscribePush() {
+    if (!this.notificationsOn() || !this.room || !this.room.view.vapid) return;
+    try {
+      const reg = this.swReg || (await navigator.serviceWorker.ready);
+      const key = Uint8Array.from(atob(this.room.view.vapid.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+      const sub = (await reg.pushManager.getSubscription()) || (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }));
+      await this.getClient().push(this.room.code, sub.toJSON());
+    } catch (e) {
+      console.warn('push subscription failed', e);
     }
   }
 }

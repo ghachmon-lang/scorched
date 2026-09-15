@@ -1,4 +1,4 @@
-// DOM helpers and the non-game screens (menu, setup, lobby, shop, results…).
+// DOM helpers and the non-game screens (menu, lobby, practice setup, shop…).
 import { AI_LEVELS, PLAYER_COLORS, DEFAULT_SETTINGS } from './game.js';
 import { WEAPONS, ITEMS, WEAPON_ORDER, ITEM_ORDER, weaponDesc } from './weapons.js';
 
@@ -81,17 +81,42 @@ export function money(n) {
   return '$' + Math.round(n).toLocaleString('en-US');
 }
 
+function aiName(id) {
+  return (AI_LEVELS.find((l) => l.id === id) || {}).name || 'AI';
+}
+
+export function relativeTime(ts) {
+  if (!ts) return '';
+  const d = Date.now() - ts;
+  const m = Math.round(d / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m} min ago`;
+  const hrs = Math.round(m / 60);
+  if (hrs < 48) return `${hrs} h ago`;
+  return `${Math.round(hrs / 24)} days ago`;
+}
+
 // ------------------------------------------------------------ screens
 
 export function menuScreen(app) {
-  const cfg = window.SCORCHED_CONFIG || {};
-  const online = app.netAvailable() && !cfg.onlineDisabled;
+  const online = app.onlineAvailable();
+  const games = app.savedGames();
+  const list = h('div', { class: 'stack', id: 'my-games' });
+  for (const g of games) {
+    list.appendChild(h('button', { class: 'game-row', 'data-code': g.code, onclick: () => app.openRoom(g.code) },
+      h('div', { class: 'code-sm' }, g.code),
+      h('div', { class: 'grow' }, h('div', { class: 'game-title' }, g.label || `Room ${g.code}`), h('div', { class: 'muted game-status' }, g.phase === 'over' ? 'Finished' : g.phase === 'lobby' ? 'In the lobby' : 'Checking…')),
+      h('span', { class: 'pill turn-pill', hidden: true }, 'Your turn'),
+      h('span', { class: 'btn small ghost forget', role: 'button', 'aria-label': 'Forget this game', onclick: (e) => { e.stopPropagation(); app.forgetGame(g.code); } }, '✕'),
+    ));
+  }
   return h('section', { class: 'screen' }, page(
     h('div', { class: 'title' }, h('h1', {}, 'SCORCHED EARTH'), h('div', { class: 'sub' }, 'The Mother of All Games. Now in your pocket.')),
-    h('button', { class: 'btn primary', onclick: () => app.gotoSetup(false) }, 'Pass & Play'),
-    h('button', { class: 'btn accent', onclick: () => app.gotoHost(), disabled: !online }, 'Host online game'),
-    h('button', { class: 'btn accent', onclick: () => app.gotoJoin(), disabled: !online }, 'Join online game'),
-    !online && h('div', { class: 'muted', style: { textAlign: 'center' } }, cfg.onlineDisabled || 'Online play needs the PeerJS library (vendor/peerjs.min.js) and a network connection.'),
+    h('button', { class: 'btn primary', disabled: !online, onclick: () => app.newGame() }, 'New game with friends'),
+    h('button', { class: 'btn accent', disabled: !online, onclick: () => app.gotoJoin() }, 'Join with a room code'),
+    !online && h('div', { class: 'muted', style: { textAlign: 'center' } }, app.onlineDisabledReason()),
+    games.length ? h('div', { class: 'card' }, h('h3', {}, 'My games'), list) : null,
+    h('button', { class: 'btn', onclick: () => app.gotoPractice() }, 'Practice against the computer'),
     h('div', { class: 'row' },
       h('button', { class: 'btn grow', onclick: () => app.gotoSettings() }, 'Settings'),
       h('button', { class: 'btn grow', onclick: () => app.gotoHelp() }, 'How to play'),
@@ -103,63 +128,65 @@ export function menuScreen(app) {
   ));
 }
 
-function defaultPlayers(app) {
-  const saved = app.prefs.players;
-  if (saved && saved.length >= 2) return saved.map((p) => ({ ...p }));
-  return [
-    { name: app.prefs.name || 'Player 1', type: 'human', color: PLAYER_COLORS[0] },
-    { name: 'Player 2', type: 'human', color: PLAYER_COLORS[1] },
-    { name: 'Poolshark', type: 'ai', ai: 'poolshark', color: PLAYER_COLORS[2] },
-  ];
+export function namePrompt(app, onDone) {
+  let name = app.prefs.name || '';
+  let color = app.prefs.color || PLAYER_COLORS[0];
+  const swatches = h('div', { class: 'row' });
+  const render = () => {
+    swatches.innerHTML = '';
+    for (const c of PLAYER_COLORS) swatches.appendChild(h('button', { class: 'swatch' + (c === color ? ' on' : ''), style: { background: c }, 'aria-label': c, onclick: () => { color = c; render(); } }));
+  };
+  render();
+  const input = h('input', { id: 'name-input', maxlength: 12, placeholder: 'Commander', value: name, oninput: (e) => (name = e.target.value) });
+  const box = h('div', { class: 'stack' },
+    modalTitle('Who are you?'),
+    h('div', { class: 'field' }, h('span', { class: 'label' }, 'Your name'), input),
+    h('div', { class: 'field' }, h('span', { class: 'label' }, 'Tank colour'), swatches),
+    h('button', { class: 'btn primary', onclick: () => {
+      const n = name.trim();
+      if (!n) { input.focus(); return; }
+      app.prefs.name = n;
+      app.prefs.color = color;
+      app.savePrefs();
+      closeModal();
+      onDone(n, color);
+    } }, 'Continue'),
+  );
+  modal(box);
+  setTimeout(() => input.focus(), 50);
 }
 
-const AI_NAMES = ['Genghis', 'Napoleon', 'Attila', 'Cleo', 'Boudica', 'Hannibal', 'Patton', 'Sun Tzu', 'Rommel', 'Zhukov', 'Joan', 'Caesar'];
+const AI_NAMES = ['Genghis', 'Napoleon', 'Attila', 'Cleo', 'Boudica', 'Hannibal', 'Patton', 'Sun Tzu', 'Rommel'];
 
-export function setupScreen(app) {
-  const players = defaultPlayers(app);
+export function practiceScreen(app) {
+  const saved = app.prefs.practice;
+  const bots = saved && saved.length ? saved.map((b) => ({ ...b })) : [{ ai: 'shooter' }, { ai: 'poolshark' }];
   const list = h('div', { class: 'stack' });
   const render = () => {
     list.innerHTML = '';
-    players.forEach((p, i) => {
-      const sel = h('select', {
-        onchange: (e) => {
-          const v = e.target.value;
-          if (v === 'human') { p.type = 'human'; delete p.ai; }
-          else { p.type = 'ai'; p.ai = v; if (/^Player \d+$/.test(p.name)) p.name = AI_NAMES[i % AI_NAMES.length]; }
-          render();
-        },
-      },
-        h('option', { value: 'human', selected: p.type === 'human' }, 'Human'),
-        ...AI_LEVELS.map((l) => h('option', { value: l.id, selected: p.type === 'ai' && p.ai === l.id }, `AI: ${l.name}`)),
-      );
+    bots.forEach((b, i) => {
       list.appendChild(h('div', { class: 'player-row' },
-        h('button', { class: 'swatch', style: { background: p.color }, 'aria-label': 'Change colour', onclick: () => { p.color = PLAYER_COLORS[(PLAYER_COLORS.indexOf(p.color) + 1) % PLAYER_COLORS.length]; render(); } }),
-        h('input', { value: p.name, maxlength: 12, placeholder: `Player ${i + 1}`, oninput: (e) => (p.name = e.target.value) }),
-        sel,
-        h('button', { class: 'btn small ghost', 'aria-label': 'Remove', disabled: players.length <= 2, onclick: () => { players.splice(i, 1); render(); } }, '✕'),
+        h('div', { class: 'swatch', style: { background: PLAYER_COLORS[(i + 1) % PLAYER_COLORS.length] } }),
+        h('div', {}, h('b', {}, AI_NAMES[i % AI_NAMES.length]), h('div', { class: 'muted' }, (AI_LEVELS.find((l) => l.id === b.ai) || {}).desc || '')),
+        h('select', { onchange: (e) => (b.ai = e.target.value) }, ...AI_LEVELS.map((l) => h('option', { value: l.id, selected: b.ai === l.id }, l.name))),
+        h('button', { class: 'btn small ghost', 'aria-label': 'Remove', disabled: bots.length <= 1, onclick: () => { bots.splice(i, 1); render(); } }, '✕'),
       ));
     });
   };
   render();
   return h('section', { class: 'screen' }, page(
-    h('div', { class: 'row' }, h('button', { class: 'btn small ghost', onclick: () => app.gotoMenu() }, '◀ Menu'), h('h2', { class: 'grow' }, 'Players')),
-    h('div', { class: 'muted' }, 'Everyone plays on this device, passing it around. Add AI tanks to fill the field.'),
+    h('div', { class: 'row' }, h('button', { class: 'btn small ghost', onclick: () => app.gotoMenu() }, '◀ Menu'), h('h2', { class: 'grow' }, 'Practice')),
+    h('div', { class: 'muted' }, 'You against the computer, on this phone only. Nothing is saved.'),
     list,
-    h('button', { class: 'btn', disabled: players.length >= 10, onclick: () => {
-      const used = new Set(players.map((p) => p.color));
-      const color = PLAYER_COLORS.find((c) => !used.has(c)) || PLAYER_COLORS[players.length % PLAYER_COLORS.length];
-      players.push({ name: AI_NAMES[players.length % AI_NAMES.length], type: 'ai', ai: AI_LEVELS[Math.min(players.length, 6) % 7].id, color });
-      render();
-    } }, '+ Add player'),
-    h('div', { class: 'row' },
-      h('button', { class: 'btn grow', onclick: () => app.gotoSettings(() => app.gotoSetup(false)) }, 'Game settings'),
-    ),
+    h('button', { class: 'btn', disabled: bots.length >= 9, onclick: () => { bots.push({ ai: AI_LEVELS[bots.length % AI_LEVELS.length].id }); render(); } }, '+ Add opponent'),
+    h('button', { class: 'btn', onclick: () => app.gotoSettings(() => app.gotoPractice()) }, 'Game settings'),
     h('button', { class: 'btn primary', onclick: () => {
-      const cleaned = players.map((p, i) => ({ ...p, name: (p.name || '').trim() || `Player ${i + 1}` }));
-      app.prefs.players = cleaned;
+      app.prefs.practice = bots;
       app.savePrefs();
-      app.startLocalGame(cleaned);
-    } }, 'Start game'),
+      const go = (name, color) => app.startPractice(name, color, bots);
+      if (app.prefs.name) go(app.prefs.name, app.prefs.color || PLAYER_COLORS[0]);
+      else namePrompt(app, go);
+    } }, 'Start'),
   ));
 }
 
@@ -180,17 +207,16 @@ export function settingsScreen(app, back) {
       h('option', { value: 'on', selected: obj[key] }, 'On'), h('option', { value: 'off', selected: !obj[key] }, 'Off')),
   );
   const prefs = app.prefs;
-  const peer = { ...prefs.peer };
+  let server = prefs.server || '';
   return h('section', { class: 'screen' }, page(
     h('div', { class: 'row' }, h('button', { class: 'btn small ghost', onclick: () => back ? back() : app.gotoMenu() }, '◀ Back'), h('h2', { class: 'grow' }, 'Settings')),
-    h('div', { class: 'card stack' }, h('h3', {}, 'Game'),
+    h('div', { class: 'card stack' }, h('h3', {}, 'New games'),
+      h('div', { class: 'muted' }, 'Used when you create a room or start a practice game.'),
       num('Rounds', 'rounds', 1, 99, 1),
       num('Starting cash', 'initialCash', 0, 1000000, 1000),
       opt('Interest per round', 'interest', [[0, '0%'], [0.05, '5%'], [0.1, '10%'], [0.2, '20%']], Number),
       opt('Turn order', 'turnOrder', [['roundRobin', 'Round robin'], ['random', 'Random'], ['loserFirst', 'Loser first'], ['winnerFirst', 'Winner first']]),
       num('Max turns per player / round', 'maxTurns', 0, 500, 10),
-    ),
-    h('div', { class: 'card stack' }, h('h3', {}, 'Physics'),
       opt('Gravity', 'gravity', [[0.5, 'Moon (50%)'], [0.75, 'Light (75%)'], [1, 'Earth (100%)'], [1.5, 'Heavy (150%)'], [2, 'Jupiter (200%)']], Number),
       opt('Wind', 'windMode', [['none', 'None'], ['constant', 'Constant per round'], ['changing', 'Changes every turn']]),
       opt('Wind strength', 'windStrength', [[0.5, 'Breeze'], [1, 'Normal'], [1.5, 'Gale'], [2.5, 'Hurricane']], Number),
@@ -200,29 +226,24 @@ export function settingsScreen(app, back) {
       tog('Exploding tanks', 'tankExplosions'),
       tog('Talking tanks', 'talkingTanks'),
     ),
-    h('div', { class: 'card stack' }, h('h3', {}, 'This device'),
-      h('div', { class: 'field inline' }, h('span', { class: 'label' }, 'Your name'), h('input', { value: prefs.name, maxlength: 12, oninput: (e) => (prefs.name = e.target.value) })),
+    h('div', { class: 'card stack' }, h('h3', {}, 'This phone'),
+      h('div', { class: 'field inline' }, h('span', { class: 'label' }, 'Your name'), h('input', { value: prefs.name, maxlength: 12, oninput: (e) => (prefs.name = e.target.value.trim()) })),
+      tog('Turn notifications', 'notify', prefs),
       tog('Sound', 'sound', prefs),
       tog('Shot trails', 'trails', prefs),
       tog('Name labels', 'labels', prefs),
       tog('Fast AI turns', 'fastAI', prefs),
       tog('Drag on field to aim', 'dragAim', prefs),
     ),
-    h('details', { class: 'card' }, h('summary', { class: 'label' }, 'Advanced: online relay server'),
+    h('details', { class: 'card', open: !app.onlineAvailable() || undefined }, h('summary', { class: 'label' }, 'Advanced: game server'),
       h('div', { class: 'stack', style: { marginTop: '8px' } },
-        h('div', { class: 'muted' }, 'Leave blank to use the free public PeerJS cloud. Fill in to use your own PeerServer (see README).'),
-        h('div', { class: 'field' }, h('span', { class: 'label' }, 'Host'), h('input', { value: peer.host, placeholder: 'peer.example.com', oninput: (e) => (peer.host = e.target.value.trim()) })),
-        h('div', { class: 'row' },
-          h('div', { class: 'field grow' }, h('span', { class: 'label' }, 'Port'), h('input', { value: peer.port, placeholder: '443', inputmode: 'numeric', oninput: (e) => (peer.port = e.target.value.trim()) })),
-          h('div', { class: 'field grow' }, h('span', { class: 'label' }, 'Path'), h('input', { value: peer.path, placeholder: '/', oninput: (e) => (peer.path = e.target.value.trim()) })),
-        ),
-        h('div', { class: 'field' }, h('span', { class: 'label' }, 'Key'), h('input', { value: peer.key, placeholder: 'peerjs', oninput: (e) => (peer.key = e.target.value.trim()) })),
-        tog('Secure (wss)', 'secure', peer),
+        h('div', { class: 'muted' }, 'The Cloudflare Worker from the server/ folder of the project. Leave blank to use the address built into this version of the game.'),
+        h('div', { class: 'field' }, h('span', { class: 'label' }, 'Server URL'), h('input', { value: server, placeholder: 'https://scorched-earth.yourname.workers.dev', inputmode: 'url', autocapitalize: 'off', oninput: (e) => (server = e.target.value.trim()) })),
       ),
     ),
     h('button', { class: 'btn primary', onclick: () => {
       prefs.settings = s;
-      prefs.peer = peer;
+      prefs.server = server.replace(/\/+$/, '');
       app.savePrefs();
       app.applyPrefs();
       if (back) back(); else app.gotoMenu();
@@ -236,8 +257,10 @@ export function helpScreen(app, back) {
     h('div', { class: 'card help' },
       h('h3', {}, 'The idea'),
       h('p', {}, 'Each tank takes turns lobbing shells at the others. Set an angle and a power, mind the wind, and fire. Last tank standing wins the round and everybody earns cash for damage and kills to spend in the shop between rounds.'),
+      h('h3', {}, 'Playing with friends'),
+      h('p', {}, 'Tap "New game with friends" and share the four-letter room code or the link. Everyone joins from their own phone. The game lives on the server, so you can close the app any time: when it is your turn you get a notification (if you allowed them), and the game picks up exactly where it was. Only one player needs the app open for the computer tanks to take their turns.'),
       h('h3', {}, 'Controls'),
-      h('p', {}, h('b', {}, 'Touch:'), ' drag anywhere on the battlefield to aim: the direction sets the angle, the distance sets the power. Fine-tune with the ◀ ▶ − + buttons (hold to repeat). Tap WEAPON to pick a shell, ITEMS to raise shields, use batteries or drive with fuel. Then hit FIRE.'),
+      h('p', {}, h('b', {}, 'Touch:'), ' drag anywhere on the battlefield to aim: left and right change the angle, up and down the power. Fine-tune with the ◀ ▶ − + buttons (hold to repeat). Tap WEAPON to pick a shell, ITEMS to raise shields, use batteries or drive with fuel. Then hit FIRE.'),
       h('p', {}, h('b', {}, 'Keyboard:'), ' ', h('kbd', {}, '←'), ' ', h('kbd', {}, '→'), ' angle, ', h('kbd', {}, '↑'), ' ', h('kbd', {}, '↓'), ' power (hold ', h('kbd', {}, 'Shift'), ' for big steps), ', h('kbd', {}, 'PgUp'), '/', h('kbd', {}, 'PgDn'), ' power ±100, ', h('kbd', {}, 'Tab'), ' cycle weapons, ', h('kbd', {}, 'I'), ' items, ', h('kbd', {}, 'Space'), ' fire, ', h('kbd', {}, 'F'), ' fast-forward, ', h('kbd', {}, 'Esc'), ' menu.'),
       h('h3', {}, 'Reading the field'),
       h('p', {}, 'The bar at the top shows the current player, angle (0 = right, 90 = straight up, 180 = left), power, wind and the selected weapon. Wind pushes shells in the direction of the arrow. A ▼ marker at the top of the screen tracks shells that have flown off the top.'),
@@ -245,8 +268,8 @@ export function helpScreen(app, back) {
       h('p', {}, h('b', {}, 'Missiles and nukes'), ' explode on impact; bigger is better. ', h('b', {}, 'MIRV'), ' splits into five warheads at the top of its arc. ', h('b', {}, 'Leap Frog'), ' bounces on three times. ', h('b', {}, 'Funky Bomb'), ' scatters bomblets. ', h('b', {}, 'Napalm'), ' burns and flows downhill. ', h('b', {}, 'Rollers'), ' roll down slopes until they hit something. ', h('b', {}, 'Diggers'), ' and ', h('b', {}, 'Sandhogs'), ' tunnel through dirt. ', h('b', {}, 'Riot'), ' charges clear dirt without hurting anyone. ', h('b', {}, 'Dirt'), ' weapons bury tanks. ', h('b', {}, 'Tracers'), ' cost nothing and show you where a shot lands. ', h('b', {}, 'Laser'), ' fires a straight beam.'),
       h('h3', {}, 'Items'),
       h('p', {}, h('b', {}, 'Shields'), ' soak up damage until they run out. ', h('b', {}, 'Deflector'), ' bounces shells, ', h('b', {}, 'Mag Deflector'), ' pushes them away. ', h('b', {}, 'Parachutes'), ' open automatically when the ground is blown away under you. ', h('b', {}, 'Batteries'), ' repair damage. ', h('b', {}, 'Fuel'), ' lets you drive.'),
-      h('h3', {}, 'Playing with friends'),
-      h('p', {}, h('b', {}, 'Pass & Play:'), ' everyone shares one phone. ', h('b', {}, 'Online:'), ' one player hosts and shares a 4-letter room code (or a link); the others join from their own phones. The game runs in lockstep on every device, so it needs only a tiny trickle of data.'),
+      h('h3', {}, 'Someone stopped playing?'),
+      h('p', {}, 'The host can hand any tank to the computer from the in-game menu, and you can hand over your own tank if you want out. If you come back later you can take it back.'),
     ),
   ));
 }
@@ -257,9 +280,9 @@ export function joinScreen(app, prefill) {
   const status = h('div', { class: 'muted' });
   const btn = h('button', { class: 'btn primary', onclick: async () => {
     if (!name.trim()) { status.textContent = 'Enter your name first.'; return; }
-    if (code.length < 4) { status.textContent = 'Enter the 4-letter room code.'; return; }
+    if (code.length < 4) { status.textContent = 'Enter the room code.'; return; }
     btn.disabled = true;
-    status.textContent = 'Connecting…';
+    status.textContent = 'Joining…';
     try {
       app.prefs.name = name.trim();
       app.savePrefs();
@@ -271,8 +294,8 @@ export function joinScreen(app, prefill) {
   } }, 'Join');
   return h('section', { class: 'screen' }, page(
     h('div', { class: 'row' }, h('button', { class: 'btn small ghost', onclick: () => app.gotoMenu() }, '◀ Menu'), h('h2', { class: 'grow' }, 'Join a game')),
-    h('div', { class: 'field' }, h('span', { class: 'label' }, 'Your name'), h('input', { value: name, maxlength: 12, oninput: (e) => (name = e.target.value) })),
-    h('div', { class: 'field' }, h('span', { class: 'label' }, 'Room code'), h('input', { value: code, maxlength: 8, autocapitalize: 'characters', autocomplete: 'off', style: { textTransform: 'uppercase', letterSpacing: '0.3em', fontSize: '24px', textAlign: 'center' }, oninput: (e) => { code = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''); e.target.value = code; } })),
+    h('div', { class: 'field' }, h('span', { class: 'label' }, 'Your name'), h('input', { id: 'join-name', value: name, maxlength: 12, oninput: (e) => (name = e.target.value) })),
+    h('div', { class: 'field' }, h('span', { class: 'label' }, 'Room code'), h('input', { id: 'join-code', value: code, maxlength: 8, autocapitalize: 'characters', autocomplete: 'off', style: { textTransform: 'uppercase', letterSpacing: '0.3em', fontSize: '24px', textAlign: 'center' }, oninput: (e) => { code = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''); e.target.value = code; } })),
     btn,
     status,
   ));
@@ -280,56 +303,67 @@ export function joinScreen(app, prefill) {
 
 export function lobbyScreen(app) {
   const L = app.lobby;
-  const isHost = app.net && app.net.isHost;
+  const isHost = L.hostId === app.myId;
   const list = h('div', { class: 'stack' });
-  const s = L.settings;
-  const renderList = () => {
-    list.innerHTML = '';
-    L.players.forEach((p, i) => {
-      list.appendChild(h('div', { class: 'player-row' },
-        h('div', { class: 'swatch', style: { background: p.color, cursor: isHost || p.owner === app.myId ? 'pointer' : 'default' }, onclick: () => {
-          if (!(isHost || p.owner === app.myId)) return;
-          const next = PLAYER_COLORS[(PLAYER_COLORS.indexOf(p.color) + 1) % PLAYER_COLORS.length];
-          app.lobbyUpdate({ idx: i, color: next });
-        } }),
-        h('div', {}, h('b', {}, p.name), ' ', h('span', { class: 'pill' }, p.type === 'ai' ? 'AI: ' + (AI_LEVELS.find((l) => l.id === p.ai) || {}).name : p.owner === app.myId ? 'you' : 'online')),
-        p.type === 'ai' && isHost
-          ? h('select', { onchange: (e) => app.lobbyUpdate({ idx: i, ai: e.target.value }) }, ...AI_LEVELS.map((l) => h('option', { value: l.id, selected: p.ai === l.id }, l.name)))
-          : h('span'),
-        isHost && i !== 0 ? h('button', { class: 'btn small ghost', onclick: () => app.lobbyRemove(i) }, '✕') : h('span'),
-      ));
-    });
-  };
-  renderList();
-  L.renderList = renderList;
+  L.players.forEach((p, i) => {
+    const mine = p.owner === app.myId;
+    list.appendChild(h('div', { class: 'player-row' },
+      h('button', { class: 'swatch', style: { background: p.color }, disabled: !(isHost || mine), 'aria-label': 'Change colour', onclick: () => {
+        app.lobbyUpdate({ idx: i, color: PLAYER_COLORS[(PLAYER_COLORS.indexOf(p.color) + 1) % PLAYER_COLORS.length] });
+      } }),
+      h('div', {}, h('b', {}, p.name), ' ', h('span', { class: 'pill' }, p.type === 'ai' ? 'AI: ' + aiName(p.ai) : mine ? 'you' : p.id === L.hostId ? 'host' : 'joined')),
+      p.type === 'ai' && isHost
+        ? h('select', { onchange: (e) => app.lobbyUpdate({ idx: i, ai: e.target.value }) }, ...AI_LEVELS.map((l) => h('option', { value: l.id, selected: p.ai === l.id }, l.name)))
+        : h('span'),
+      isHost && p.id !== L.hostId ? h('button', { class: 'btn small ghost', onclick: () => app.lobbyRemove(i) }, '✕') : h('span'),
+    ));
+  });
   const link = app.joinLink();
   return h('section', { class: 'screen' }, page(
     h('div', { class: 'row' }, h('button', { class: 'btn small ghost', onclick: () => app.leaveLobby() }, '◀ Leave'), h('h2', { class: 'grow' }, isHost ? 'Your room' : 'Lobby')),
     h('div', { class: 'card' },
       h('div', { class: 'label', style: { textAlign: 'center' } }, 'Room code'),
       h('div', { class: 'code' }, L.code),
-      h('div', { class: 'muted', style: { textAlign: 'center' } }, 'Friends pick "Join online game" and type this code.'),
+      h('div', { class: 'muted', style: { textAlign: 'center' } }, 'Friends tap "Join with a room code" and type this, or open the link.'),
       h('div', { class: 'row', style: { marginTop: '10px', justifyContent: 'center' } },
         navigator.share ? h('button', { class: 'btn small', onclick: () => navigator.share({ title: 'Scorched Earth', text: `Join my Scorched Earth game! Room code ${L.code}`, url: link }).catch(() => {}) }, 'Share link') : null,
         h('button', { class: 'btn small', onclick: () => { navigator.clipboard && navigator.clipboard.writeText(link).then(() => toast('Link copied')); } }, 'Copy link'),
       ),
     ),
-    h('div', { class: 'card' }, h('h3', {}, 'Players'), list,
-      isHost ? h('button', { class: 'btn small', style: { marginTop: '8px' }, disabled: L.players.length >= 10, onclick: () => app.lobbyAddAI() }, '+ Add AI tank') : null),
+    h('div', { class: 'card' }, h('h3', {}, 'Tanks'), list,
+      isHost ? h('button', { class: 'btn small', style: { marginTop: '8px' }, disabled: L.players.length >= 10, onclick: () => app.lobbyAddAI() }, '+ Add computer tank') : null),
     isHost
       ? h('div', { class: 'card stack' }, h('h3', {}, 'Game'),
-          h('div', { class: 'field inline' }, h('span', { class: 'label' }, 'Rounds'), h('input', { type: 'number', min: 1, max: 99, value: s.rounds, inputmode: 'numeric', onchange: (e) => { s.rounds = Math.max(1, Math.min(99, Number(e.target.value) || 1)); app.lobbySettingsChanged(); } })),
+          h('div', { class: 'field inline' }, h('span', { class: 'label' }, 'Rounds'), h('input', { type: 'number', min: 1, max: 99, value: L.settings.rounds || 5, inputmode: 'numeric', onchange: (e) => app.lobbySettings({ rounds: Math.max(1, Math.min(99, Number(e.target.value) || 1)) }) })),
           h('div', { class: 'muted' }, 'Physics and economy come from your Settings screen.'))
-      : h('div', { class: 'muted' }, `${s.rounds} round${s.rounds === 1 ? '' : 's'}. Waiting for the host to start…`),
+      : h('div', { class: 'muted' }, `${L.settings.rounds || 5} round${(L.settings.rounds || 5) === 1 ? '' : 's'}. Waiting for the host to start…`),
+    notifyButton(app),
     isHost ? h('button', { class: 'btn primary', disabled: L.players.length < 2, onclick: () => app.startOnlineGame() }, 'Start game') : null,
   ));
+}
+
+export function notifyButton(app) {
+  if (!app.canNotify()) return null;
+  if (app.notificationsOn()) return h('div', { class: 'muted', style: { textAlign: 'center' } }, '🔔 You will be notified when it is your turn.');
+  return h('button', { class: 'btn accent', onclick: () => app.enableNotifications() }, '🔔 Notify me when it is my turn');
+}
+
+export function loadingScreen(app, text) {
+  const bar = h('div', { class: 'bar' });
+  const el = h('section', { class: 'screen' }, page(
+    h('div', { class: 'title' }, h('h1', {}, 'LOADING')),
+    h('div', { class: 'card' }, h('p', { class: 'loading-text' }, text), h('div', { class: 'progress' }, bar)),
+  ));
+  el.setProgress = (f) => { bar.style.width = `${Math.round(Math.max(0, Math.min(1, f)) * 100)}%`; };
+  el.setText = (t) => { el.querySelector('.loading-text').textContent = t; };
+  return el;
 }
 
 export function shopScreen(app, idx, onDone) {
   const g = app.game;
   const p = g.players[idx];
   let cash = p.cash;
-  const buys = []; // {kind,id,n}
+  const buys = [];
   const tentative = { weapons: { ...p.weapons }, items: { ...p.items } };
   let tab = 'weapons';
   const cashEl = h('span', { class: 'ctl-cash' }, money(cash));
@@ -398,7 +432,7 @@ export function standingsList(g) {
   return h('div', {}, ...sorted.map((p, i) => h('div', { class: 'standing' },
     h('b', {}, `${i + 1}.`),
     h('div', { class: 'dot', style: { background: p.color } }),
-    h('div', {}, h('b', { style: { color: p.color } }, p.name), ' ', h('span', { class: 'muted' }, p.type === 'ai' ? `(${(AI_LEVELS.find((l) => l.id === p.ai) || {}).name || 'AI'})` : '')),
+    h('div', {}, h('b', { style: { color: p.color } }, p.name), ' ', h('span', { class: 'muted' }, p.type === 'ai' ? `(${aiName(p.ai)})` : '')),
     h('div', { class: 'stats' }, `${p.wins} win${p.wins === 1 ? '' : 's'} · ${p.kills} kill${p.kills === 1 ? '' : 's'} · ${money(p.cash)}`),
   )));
 }
@@ -423,6 +457,7 @@ export function waitingScreen(app, text, detail) {
   return h('section', { class: 'screen' }, page(
     h('div', { class: 'title' }, h('h1', {}, 'PLEASE HOLD')),
     h('div', { class: 'card' }, h('p', {}, text), detail || null),
-    h('button', { class: 'btn ghost', onclick: () => app.confirmQuit() }, 'Quit game'),
+    notifyButton(app),
+    h('button', { class: 'btn ghost', onclick: () => app.gotoMenu() }, 'Back to menu'),
   ));
 }

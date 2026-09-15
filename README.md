@@ -1,26 +1,62 @@
 # Scorched Earth (mobile)
 
-A remake of the 1991 DOS artillery classic **Scorched Earth** ("The Mother of All Games") that runs in any modern browser, installs to your phone's home screen, and lets you play **pass-and-play** on one phone or **online** with friends on their own phones.
+A remake of the 1991 DOS artillery classic **Scorched Earth** ("The Mother of All Games") for phones. Every player plays on their own phone, at their own pace: the game lives on a tiny server, you get a notification when it is your turn, and you can close the app and come back hours later.
 
 ![Scorched Earth screenshot](docs/screenshot.png)
 
-Same visuals, same gameplay: 640×360 pixel battlefield with gradient skies and strata-shaded hills, tiny tanks, ringed explosions, falling dirt, wind, walls, talking tanks, a shop between rounds and the whole 1.5-era arsenal. Only better: touch controls, drag-to-aim, an online mode, and no DOSBox required.
+Same visuals, same gameplay: 640×360 pixel battlefield with gradient skies and strata-shaded hills, tiny tanks, ringed explosions, falling dirt, wind, walls, talking tanks, a shop between rounds and the whole 1.5-era arsenal. Only better: touch controls, drag-to-aim, online rooms, turn notifications, and no DOSBox required.
 
-## Play
+## How playing works
 
-* **Hosted:** once GitHub Pages is enabled for this repo (Settings → Pages → Source: *GitHub Actions*), the game is served at `https://<owner>.github.io/scorched/` on every push to `main`. Open it on your phone, and use "Add to Home Screen" to install it. It works offline after the first load.
-* **Locally:** `npm start` then open <http://localhost:8080>. The server also prints your Wi-Fi address so phones on the same network can join in.
-* **Anywhere:** it is a plain static site with no build step and no dependencies. Copy the folder to any web host.
+1. One player taps **New game with friends** and gets a four-letter room code plus a share link.
+2. Friends tap **Join with a room code** (or open the link) on their own phones. The host can add computer tanks and sets the number of rounds, then starts.
+3. Take your turn whenever you like. Others get a **"your turn" notification** (if they allowed it) and the game is waiting for them under **My games** on the menu, exactly where it was.
+4. Someone stopped playing? The host can hand their tank to the computer from the in-game menu; they can take it back later.
 
-## Playing with others
+Only one player needs the app open for the computer tanks to move. Nothing depends on anyone staying connected.
 
-**Pass & Play.** Everyone shares one phone. Add up to ten players, human or computer, and pass the phone around. The game shows a "pass to …" card between human turns.
+There is also **Practice against the computer**: a local game on one phone, not saved.
 
-**Online.** One player taps *Host online game* and gets a four-letter room code (and a share link). Friends tap *Join online game* and enter the code. The host can add computer tanks, sets the number of rounds, and starts the game. Every phone runs the exact same simulation in lockstep and only turn commands travel over the wire, so it uses a trickle of data and stays perfectly in sync.
+## Deploying your own copy
 
-* Connections are peer-to-peer over WebRTC. The free public [PeerJS](https://peerjs.com) signalling server is used by default to introduce peers; no game data passes through it.
-* If a player drops out, the computer takes over their tank. If they rejoin with the same name, they get it back. If the host drops, the other phones carry on offline against computer opponents.
-* Some mobile networks (symmetric NAT) block direct peer-to-peer connections. If joining fails, try Wi-Fi, or run your own [PeerServer](https://github.com/peers/peerjs-server) with a TURN server and enter its address under *Settings → Advanced: online relay server*.
+Two parts: the game (static files, GitHub Pages) and the room server (a Cloudflare Worker with one Durable Object per room; the free plan is plenty).
+
+### 1. The room server
+
+```
+cd server
+npm install
+npx wrangler login        # opens the browser once
+npx wrangler deploy       # prints the Worker URL, e.g. https://scorched-earth.<you>.workers.dev
+```
+
+Optional but recommended, turn notifications:
+
+```
+npm run keys                                   # prints a VAPID key pair
+# paste the public key into wrangler.toml as VAPID_PUBLIC_KEY, set VAPID_SUBJECT to a mailto: you own
+npx wrangler secret put VAPID_PRIVATE_JWK      # paste the private JSON when prompted
+npx wrangler deploy
+```
+
+You can also let GitHub deploy the server for you: add repository secrets `CLOUDFLARE_API_TOKEN` (a token with *Workers Scripts: Edit*) and `CLOUDFLARE_ACCOUNT_ID`; the `Deploy room server` workflow runs whenever `server/` changes on `main`.
+
+### 2. The game
+
+* Paste the Worker URL into `src/config.js` (`SERVER_URL`) and push to `main`.
+* Enable GitHub Pages once: Settings → Pages → Source: **GitHub Actions**. The `Test and deploy` workflow publishes the game at `https://<owner>.github.io/scorched/` on every push.
+* Open that link on your phone and use "Add to Home Screen". On iPhone, notifications only work for the home-screen version.
+
+Any static host works instead of Pages: the game is plain files with no build step. A phone can also point at a different server under Settings → Advanced, which is handy for testing.
+
+### Running everything locally
+
+```
+npm start                      # game on http://localhost:8080 (prints your Wi-Fi address too)
+cd server && npm run dev       # room server on http://127.0.0.1:8787
+```
+
+Then put `http://127.0.0.1:8787` (or your machine's address for phones on the same Wi-Fi) into Settings → Advanced → Server URL.
 
 ## Controls
 
@@ -42,32 +78,35 @@ Angle 0 points right, 90 straight up, 180 left. Wind pushes shells in the direct
 * **Terrain:** flat, hills, mountains, canyon, or random, with six sky/land colour schemes.
 * **Computer players:** Moron, Shooter, Poolshark, Tosser, Chooser, Spoiler and Cyborg, each with its own aim, weapon preferences and shopping habits.
 * **Economy:** cash for damage and kills, a round-win bonus, interest, and a shop between rounds.
-* **Talking tanks**, sound effects (PC-speaker flavoured), haptics on hits, and a PWA manifest plus service worker for offline play and home-screen install.
+* **Talking tanks**, sound effects (PC-speaker flavoured), haptics on hits, in-room chat, and a PWA manifest plus service worker for offline loading, home-screen install and notifications.
+
+## How it works
+
+The simulation (`src/game.js`) is deterministic: all randomness comes from a seeded generator and transcendental maths are quantised, so Android, iOS and desktop browsers compute bit-identical games. The server never runs the game. A room is a seed, a roster and an append-only log of sequenced commands (fire, use item, move, shop, hand over). Each phone replays the log through the same simulation and lands on the same state, whether it has been open all along or is reopened a week later. Every shot carries a checksum of the sender's state; a mismatch makes the phone reload from the log.
+
+The server is a Cloudflare Worker (`server/src/index.js`) that routes each room code to a Durable Object (`server/src/room.js`) holding the lobby, the log and WebSocket fan-out for live updates. Phones report where the game stands after each command so the server can send "your turn" pushes (empty Web Push messages signed with VAPID; the service worker asks the server what changed and shows the notification).
 
 ## Development
 
 ```
-npm test    # runs the simulation tests (determinism, every weapon, items, shop, snapshots, AI)
-npm start   # static server on port 8080
+npm test          # simulation tests (determinism, every weapon, items, shop, snapshots, AI) and server tests
+npm start         # static server on port 8080
 ```
-
-Everything is vanilla ES modules, no bundler:
 
 | File | What it does |
 |---|---|
-| `src/game.js` | The simulation: rounds, turns, firing, every weapon behaviour, damage, falling, economy, snapshots. Deterministic and DOM-free. |
+| `src/game.js` | The simulation: rounds, turns, firing, every weapon behaviour, damage, falling, economy, snapshots. DOM-free. |
 | `src/physics.js` | Projectile integration shared by the game and the AI aiming search. |
 | `src/terrain.js` | Pixel terrain: generation, craters, tunnels, dirt clods, animated falling dirt. |
 | `src/ai.js` | Computer opponents. |
 | `src/weapons.js` | Weapon and accessory catalogue and economy constants. |
 | `src/render.js`, `src/palette.js`, `src/font.js` | Canvas renderer, colour schemes, bitmap font. |
-| `src/main.js`, `src/ui.js`, `src/input.js` | App controller, screens, touch/keyboard input. |
-| `src/net.js` | PeerJS wrapper for online rooms. |
-| `src/sound.js`, `src/storage.js`, `src/taunts.js` | WebAudio effects, saved preferences, what the tanks say. |
-| `test/sim.test.mjs` | Node test suite. |
-
-The online mode is lockstep: the host assigns a sequence number to each command (fire, use item, move, shop) and relays it; each peer applies commands only when its own simulation has settled at the same point, and a checksum travels with every shot so a divergence is detected and repaired with a snapshot from the host. All randomness comes from a seeded generator and transcendental maths are quantised, so Android, iOS and desktop browsers compute identical games.
+| `src/main.js`, `src/ui.js`, `src/input.js` | App controller (rooms, replay, notifications), screens, touch/keyboard input. |
+| `src/net.js` | Client for the room server. |
+| `src/config.js` | The server URL baked into the deployed game. |
+| `sw.js` | Service worker: offline cache and push notifications. |
+| `server/` | The Cloudflare Worker and Durable Object, with its own tests and deploy scripts. |
 
 ## Credits
 
-Scorched Earth was written by Wendell Hicken in 1991. This is an independent fan remake written from scratch; it contains no code or assets from the original. Online play uses [PeerJS](https://peerjs.com) (MIT, see `vendor/PEERJS-LICENSE`).
+Scorched Earth was written by Wendell Hicken in 1991. This is an independent fan remake written from scratch; it contains no code or assets from the original.
