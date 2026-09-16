@@ -3,10 +3,10 @@ import { AI_LEVELS, PLAYER_COLORS, DEFAULT_SETTINGS } from './game.js';
 import { WEAPONS, ITEMS, WEAPON_ORDER, ITEM_ORDER, weaponDesc } from './weapons.js';
 
 export function h(tag, attrs = {}, ...children) {
-  const el = document.createElement(tag);
+  const el = tag === 'svg' ? document.createElementNS('http://www.w3.org/2000/svg', 'svg') : document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v == null || v === false) continue;
-    if (k === 'class') el.className = v;
+    if (k === 'class') el.setAttribute('class', v);
     else if (k === 'html') el.innerHTML = v;
     else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
     else if (k === 'style' && typeof v === 'object') Object.assign(el.style, v);
@@ -111,7 +111,7 @@ export function menuScreen(app) {
     ));
   }
   return h('section', { class: 'screen' }, page(
-    h('div', { class: 'title' }, h('h1', {}, 'SCORCHED EARTH'), h('div', { class: 'sub' }, 'The Mother of All Games. Now in your pocket.')),
+    titleScene(),
     h('button', { class: 'btn primary', disabled: !online, onclick: () => app.newGame() }, 'New game with friends'),
     h('button', { class: 'btn accent', disabled: !online, onclick: () => app.gotoJoin() }, 'Join with a room code'),
     !online && h('div', { class: 'muted', style: { textAlign: 'center' } }, app.onlineDisabledReason()),
@@ -126,6 +126,15 @@ export function menuScreen(app) {
       app.installPrompt ? h('a', { href: '#', onclick: (e) => { e.preventDefault(); app.install(); } }, 'Install to home screen') : '',
     ),
   ));
+}
+
+/** The original's title card: banded sunset, red sun, black mountains. */
+export function titleScene() {
+  return h('div', { class: 'title-scene' },
+    h('div', { class: 'title-sun' }),
+    h('svg', { class: 'title-mountains', viewBox: '0 0 640 120', preserveAspectRatio: 'none', html: '<polygon fill="#000000" points="0,120 0,78 40,60 80,72 130,38 170,58 210,50 260,22 300,48 340,40 380,64 430,30 470,52 520,44 560,70 600,58 640,80 640,120"/>' }),
+    h('div', { class: 'title-text' }, h('h1', {}, 'Scorched Earth'), h('div', { class: 'sub' }, 'The Mother of All Games')),
+  );
 }
 
 export function namePrompt(app, onDone) {
@@ -260,7 +269,7 @@ export function helpScreen(app, back) {
       h('h3', {}, 'Playing with friends'),
       h('p', {}, 'Tap "New game with friends" and share the four-letter room code or the link. Everyone joins from their own phone. The game lives on the server, so you can close the app any time: when it is your turn you get a notification (if you allowed them), and the game picks up exactly where it was. Only one player needs the app open for the computer tanks to take their turns.'),
       h('h3', {}, 'Controls'),
-      h('p', {}, h('b', {}, 'Touch:'), ' drag anywhere on the battlefield to aim: left and right change the angle, up and down the power. Fine-tune with the ◀ ▶ − + buttons (hold to repeat). Tap WEAPON to pick a shell, ITEMS to raise shields, use batteries or drive with fuel. Then hit FIRE.'),
+      h('p', {}, h('b', {}, 'Touch:'), ' drag anywhere on the battlefield with one finger to aim: left and right change the angle, up and down the power. Pinch with two fingers to zoom in and pan around; double-tap or the ⤢ button goes back to the full view, and every shot snaps back to it automatically. Fine-tune with the ◀ ▶ − + buttons (hold to repeat). Tap WEAPON to pick a shell, ITEMS to raise shields, use batteries or drive with fuel. Then hit FIRE.'),
       h('p', {}, h('b', {}, 'Keyboard:'), ' ', h('kbd', {}, '←'), ' ', h('kbd', {}, '→'), ' angle, ', h('kbd', {}, '↑'), ' ', h('kbd', {}, '↓'), ' power (hold ', h('kbd', {}, 'Shift'), ' for big steps), ', h('kbd', {}, 'PgUp'), '/', h('kbd', {}, 'PgDn'), ' power ±100, ', h('kbd', {}, 'Tab'), ' cycle weapons, ', h('kbd', {}, 'I'), ' items, ', h('kbd', {}, 'Space'), ' fire, ', h('kbd', {}, 'F'), ' fast-forward, ', h('kbd', {}, 'Esc'), ' menu.'),
       h('h3', {}, 'Reading the field'),
       h('p', {}, 'The bar at the top shows the current player, angle (0 = right, 90 = straight up, 180 = left), power, wind and the selected weapon. Wind pushes shells in the direction of the arrow. A ▼ marker at the top of the screen tracks shells that have flown off the top.'),

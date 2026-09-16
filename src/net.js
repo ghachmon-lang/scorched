@@ -33,7 +33,7 @@ export class RoomClient {
     return data;
   }
 
-  create({ name, color, settings }) { return this.req('/rooms/create', { method: 'POST', body: { name, color, settings } }).then((d) => d.room); }
+  create({ name, color, settings, simVersion }) { return this.req('/rooms/create', { method: 'POST', body: { name, color, settings, simVersion } }).then((d) => d.room); }
   join(code, { name, color }) { return this.req(`/rooms/${code}/join`, { method: 'POST', body: { name, color } }).then((d) => d.room); }
   state(code, since = 0) { return this.req(`/rooms/${code}/state?since=${since}`); }
   summary(code) { return this.req(`/rooms/${code}/summary`); }

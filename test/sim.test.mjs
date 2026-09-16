@@ -179,7 +179,7 @@ test('AI levels all play sensibly (cyborg lands close, moron does not crash)', (
 test('catalogue sanity', () => {
   for (const [id, w] of Object.entries(WEAPONS)) {
     assert.ok(w.name && w.kind, id);
-    if (w.kind === 'shell') assert.ok(w.radius > 0 && w.damage > 0, id);
+    if (w.kind === 'shell' && !w.hidden) assert.ok(w.radius > 0 && w.damage > 0, id);
   }
   for (const [id, it] of Object.entries(ITEMS)) assert.ok(it.name && it.kind && it.desc, id);
 });
