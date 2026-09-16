@@ -83,6 +83,16 @@ export function installInput(app) {
   // ---- battlefield gestures: one finger aims (relative: x = angle, y = power),
   // two fingers pinch-zoom and pan, double-tap resets the zoom, wheel zooms on desktop
   const stage = document.getElementById('stage');
+  // Block the browser's own pinch-zoom / scroll / double-tap on the battlefield so
+  // two-finger gestures reach the pointer handlers below (iOS Safari ignores the
+  // viewport's user-scalable=no; only preventDefault on touch events stops it).
+  const inOverlay = (e) => e.target && e.target.closest && e.target.closest('#stage-overlay');
+  for (const ev of ['touchstart', 'touchmove', 'touchend']) {
+    stage.addEventListener(ev, (e) => { if (app.game && !inOverlay(e)) e.preventDefault(); }, { passive: false });
+  }
+  for (const ev of ['gesturestart', 'gesturechange', 'gestureend']) {
+    stage.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
+  }
   const pointers = new Map(); // pointerId -> {x, y} in stage coordinates
   let drag = null;
   let pinch = null;
