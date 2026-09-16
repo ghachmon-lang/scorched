@@ -4,19 +4,21 @@
 // coloured shot trails that stay all round, ringed explosions, a grey status
 // bar and the wind readout floating in the sky.
 import { W, H, HUD_H } from './game.js';
-import { PALETTES, skyRows, packColor, shade } from './palette.js';
+import { PALETTES, skyRows, packColor } from './palette.js';
 import { drawText, textWidth } from './font.js';
 import { WEAPONS } from './weapons.js';
 import * as PH from './physics.js';
 import { DEG, dsin, dcos } from './mathd.js';
 
+// 15x7, matching the physics hit box (TANK_HALF_W 7, TANK_H 6)
 const TANK_SPRITE = [
-  '.....###.....',
-  '...#######...',
-  '..#########..',
-  '#############',
-  '#############',
-  '.###########.',
+  '......###......',
+  '....#######....',
+  '..###########..',
+  '###############',
+  '###############',
+  '.#############.',
+  '..###########..',
 ];
 const HUD_BG = '#c0c0c0';
 const HUD_FG = '#000000';
@@ -34,6 +36,14 @@ export class Renderer {
     this.palKey = -1;
     this.frame = 0;
     this.options = { trails: true, labels: true };
+    // trails accumulate on their own layer, one crisp pixel at a time
+    this.trailCanvas = document.createElement('canvas');
+    this.trailCanvas.width = W;
+    this.trailCanvas.height = H;
+    this.trailCtx = this.trailCanvas.getContext('2d');
+    this.trailDrawn = new WeakMap();
+    this.trailRound = -1;
+    this.trailFirst = null;
   }
 
   preparePalette(idx) {
@@ -102,24 +112,42 @@ export class Renderer {
   }
 
   drawTrails(game) {
-    const ctx = this.ctx;
-    ctx.lineWidth = 1;
+    const tc = this.trailCtx;
+    // a new round (or the oldest trail being dropped) means starting the layer over
+    if (this.trailRound !== game.round || this.trailFirst !== game.trails[0]) {
+      tc.clearRect(0, 0, W, H);
+      this.trailDrawn = new WeakMap();
+      this.trailRound = game.round;
+      this.trailFirst = game.trails[0] || null;
+    }
     for (const tr of game.trails) {
       const pts = tr.points;
-      if (pts.length < 4) continue;
-      ctx.strokeStyle = tr.color;
-      ctx.beginPath();
-      let px = pts[0], py = pts[1];
-      ctx.moveTo(px + 0.5, py + 0.5);
-      for (let i = 2; i < pts.length; i += 2) {
-        const x = pts[i], y = pts[i + 1];
-        // wrap-around walls teleport the shell: don't draw a line across the screen
-        if (Math.abs(x - px) > W / 2) ctx.moveTo(x + 0.5, y + 0.5);
-        else ctx.lineTo(x + 0.5, y + 0.5);
-        px = x;
-        py = y;
+      let done = this.trailDrawn.get(tr) || 0;
+      if (pts.length < 4 || done >= pts.length - 2) continue;
+      tc.fillStyle = tr.color;
+      if (done === 0) done = 2;
+      for (let i = done; i < pts.length; i += 2) {
+        const x0 = pts[i - 2], y0 = pts[i - 1], x1 = pts[i], y1 = pts[i + 1];
+        // wrap-around walls teleport the shell: no line across the screen
+        if (Math.abs(x1 - x0) > W / 2) continue;
+        this.pixelLine(tc, x0, y0, x1, y1);
       }
-      ctx.stroke();
+      this.trailDrawn.set(tr, pts.length);
+    }
+    this.ctx.drawImage(this.trailCanvas, 0, 0);
+  }
+
+  /** Bresenham line of 1x1 pixels (no antialiasing). */
+  pixelLine(ctx, x0, y0, x1, y1) {
+    const dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0);
+    const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    let err = dx + dy;
+    for (let n = 0; n < 4000; n++) {
+      ctx.fillRect(x0, y0, 1, 1);
+      if (x0 === x1 && y0 === y1) break;
+      const e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x0 += sx; }
+      if (e2 <= dx) { err += dx; y0 += sy; }
     }
   }
 
@@ -129,8 +157,8 @@ export class Renderer {
       if (e.type !== 'smoke') continue;
       const f = e.age / e.dur;
       const r = 1 + Math.min(4, e.age / 25);
-      ctx.fillStyle = `rgba(200,200,200,${0.8 * (1 - f)})`;
-      this.disc(e.x, e.y - e.age * 0.08, r);
+      ctx.fillStyle = f < 0.5 ? '#aaaaaa' : '#555555';
+      this.ring(e.x, e.y - e.age * 0.08, r, true);
     }
   }
 
@@ -159,17 +187,13 @@ export class Renderer {
     const ctx = this.ctx;
     const pl = game.players[t.idx];
     const color = pl.color;
-    const x0 = t.x - 6, y0 = t.y - 5;
+    const x0 = t.x - 7, y0 = t.y - 6;
     const a = t.angle * DEG;
     const px = t.x, py = t.y - 3;
-    const tx = px + dcos(a) * PH.BARREL_LEN, ty = py - dsin(a) * PH.BARREL_LEN;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(px + 0.5, py + 0.5);
-    ctx.lineTo(tx + 0.5, ty + 0.5);
-    ctx.stroke();
+    const tx = Math.round(px + dcos(a) * PH.BARREL_LEN), ty = Math.round(py - dsin(a) * PH.BARREL_LEN);
     ctx.fillStyle = color;
+    this.pixelLine(ctx, px, py, tx, ty);
+    this.pixelLine(ctx, px, py - 1, tx, ty - 1);
     for (let r = 0; r < TANK_SPRITE.length; r++) {
       const row = TANK_SPRITE[r];
       for (let c = 0; c < row.length; c++) if (row[c] === '#') ctx.fillRect(x0 + c, y0 + r, 1, 1);
@@ -189,11 +213,11 @@ export class Renderer {
       const w = textWidth(name, 1);
       let lx = Math.round(t.x - w / 2);
       lx = Math.max(1, Math.min(W - w - 1, lx));
-      const ly = t.y - 17;
+      const ly = t.y - 19;
       drawText(ctx, name, lx + 1, ly + 1, '#000000', 1);
       drawText(ctx, name, lx, ly, color, 1);
       const bw = 14;
-      const bx = t.x - 7, by = t.y - 9;
+      const bx = t.x - 7, by = t.y - 10;
       ctx.fillStyle = '#000000';
       ctx.fillRect(bx - 1, by - 1, bw + 2, 3);
       ctx.fillStyle = t.hp > 50 ? '#55ff55' : t.hp > 25 ? '#ffff55' : '#ff5555';
@@ -201,7 +225,7 @@ export class Renderer {
     }
     if (game.phase === 'aim' && game.current === t.idx) {
       const bob = Math.round(Math.sin(this.frame / 6) * 2);
-      const my = t.y - (this.options.labels ? 26 : 18) + bob;
+      const my = t.y - (this.options.labels ? 28 : 18) + bob;
       ctx.fillStyle = color;
       ctx.fillRect(t.x - 3, my - 2, 7, 1);
       ctx.fillRect(t.x - 2, my - 1, 5, 1);
@@ -283,8 +307,8 @@ export class Renderer {
       return;
     }
     if (e.style === 'dirt') {
-      ctx.fillStyle = `rgba(160,100,40,${0.8 * (1 - t / dur)})`;
-      this.disc(e.x, e.y, Math.max(1, r));
+      ctx.fillStyle = this.pal ? this.pal.land.color : '#a06428';
+      this.ring(e.x, e.y, Math.max(1, r));
       return;
     }
     if (r < 1) r = 1;
@@ -332,7 +356,7 @@ export class Renderer {
       const x = W - 6 - w;
       drawText(ctx, text, x + 1, y + 1, '#000000', 2);
       drawText(ctx, text, x, y, '#ffffff', 2);
-      y += 17;
+      y += 18;
     }
   }
 
@@ -349,12 +373,12 @@ export class Renderer {
       const fade = e.age > e.dur - 15 ? (e.dur - e.age) / 15 : 1;
       ctx.globalAlpha = Math.max(0, fade);
       ctx.fillStyle = '#000';
-      ctx.fillRect(x - 3, y - 3, w + 6, 20);
+      ctx.fillRect(x - 3, y - 3, w + 6, 22);
       ctx.fillStyle = game.players[e.tank].color;
       ctx.fillRect(x - 3, y - 3, w + 6, 1);
-      ctx.fillRect(x - 3, y + 16, w + 6, 1);
-      ctx.fillRect(x - 3, y - 3, 1, 20);
-      ctx.fillRect(x + w + 2, y - 3, 1, 20);
+      ctx.fillRect(x - 3, y + 18, w + 6, 1);
+      ctx.fillRect(x - 3, y - 3, 1, 22);
+      ctx.fillRect(x + w + 2, y - 3, 1, 22);
       drawText(ctx, e.text, x, y, '#ffffff', 2, true);
       ctx.globalAlpha = 1;
     }
@@ -383,25 +407,29 @@ export class Renderer {
     ctx.fillRect(0, HUD_H - 1, W, 1);
     const pl = game.players[game.current];
     const t = game.tanks[game.current];
-    const y = 3;
+    const y = 2;
     let x = 6;
     if (game.phase === 'shop') {
       drawText(ctx, 'Shopping...', x, y, HUD_FG, 2);
     } else if (game.phase === 'gameOver') {
       drawText(ctx, 'Game over', x, y, HUD_FG, 2);
     } else if (pl) {
-      x += drawText(ctx, `Power: ${t.power}`, x, y, HUD_FG, 2) + 16;
-      x += drawText(ctx, `Angle: ${t.angle}`, x, y, HUD_FG, 2) + 16;
+      x += drawText(ctx, `Power: ${t.power}`, x, y, HUD_FG, 2) + 14;
+      x += drawText(ctx, `Angle: ${t.angle}`, x, y, HUD_FG, 2) + 14;
       const name = pl.name.length > 12 ? pl.name.slice(0, 12) : pl.name;
-      const nw = textWidth(name, 2);
-      ctx.fillStyle = '#404040';
-      ctx.fillRect(x - 3, y - 2, nw + 6, 18);
-      x += drawText(ctx, name, x, y, pl.color, 2) + 18;
+      drawText(ctx, name, x + 1, y + 1, '#000000', 2);
+      x += drawText(ctx, name, x, y, pl.color, 2) + 16;
       const w = WEAPONS[t.weapon];
       const cnt = game.weaponCount(pl, t.weapon);
-      const wname = `${cnt === Infinity ? '' : cnt + ': '}${w.name}`;
+      const wname = `${cnt === Infinity || cnt <= 0 ? '' : cnt + ': '}${w.name}`;
       const maxW = W - 8 - 12 - x;
-      const label = textWidth(wname, 2) > maxW ? wname.slice(0, Math.max(3, Math.floor(maxW / 12))) : wname;
+      let label = wname;
+      if (textWidth(label, 2) > maxW) {
+        // too long: drop the count first, then trim at a word boundary
+        label = w.name;
+        while (textWidth(label, 2) > maxW && label.includes(' ')) label = label.slice(0, label.lastIndexOf(' '));
+        if (textWidth(label, 2) > maxW) label = label.slice(0, Math.max(3, Math.floor(maxW / 12)));
+      }
       // small tank glyph before the weapon name
       ctx.fillStyle = HUD_FG;
       ctx.fillRect(x, y + 6, 8, 3);

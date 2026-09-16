@@ -67,7 +67,7 @@ export class Room {
     const me = this.byToken(meta, token);
     const host = meta.players.find((p) => p.token === meta.hostToken);
     return {
-      code: meta.code, phase: meta.phase, settings: meta.settings, seed: meta.seed, seq: meta.seq, turn: meta.turn,
+      code: meta.code, phase: meta.phase, settings: meta.settings, seed: meta.seed, seq: meta.seq, turn: meta.turn, simVersion: meta.simVersion || null,
       players: this.publicPlayers(meta), startPlayers: meta.startPlayers || null, hostId: host ? host.id : null, you: me ? me.id : null,
       createdAt: meta.createdAt, updatedAt: meta.updatedAt, vapid: this.env.VAPID_PUBLIC_KEY || null,
       pushConfigured: !!(this.env.VAPID_PUBLIC_KEY && this.env.VAPID_PRIVATE_JWK),
@@ -134,6 +134,7 @@ export class Room {
     this.meta = {
       code, createdAt: now, updatedAt: now, phase: 'lobby', settings: sanitizeSettings(body.settings), seed: null,
       players: [player], hostToken: token, seq: 0, turn: null, notifiedKey: '',
+      simVersion: Number.isInteger(body.simVersion) ? body.simVersion : null,
     };
     await this.save();
     return json({ ok: true, room: this.view(this.meta, token) });
@@ -235,6 +236,7 @@ export class Room {
     meta.settings = { ...meta.settings, ...sanitizeSettings(body.settings) };
     meta.seed = (typeof body.seed === 'number' && body.seed > 0 ? body.seed : Math.floor(Math.random() * 0xfffffffe) + 1) >>> 0;
     meta.phase = 'playing';
+    if (Number.isInteger(body.simVersion)) meta.simVersion = body.simVersion; // the rules this game runs on
     meta.startPlayers = this.publicPlayers(meta); // roster as the simulation starts; replays build from this
     meta.seq = 0;
     meta.turn = { phase: 'aim', round: 1, current: -1, seq: 0, done: [] };
@@ -269,6 +271,7 @@ export class Room {
       code: meta.code, phase: meta.phase, round: t.round || 0, rounds: meta.settings.rounds || 5, turnPhase: t.phase || null,
       waitingOn, yourTurn, you: me ? me.id : null, players: meta.players.map((p) => p.name), updatedAt: meta.updatedAt,
       host: meta.players.find((p) => p.token === meta.hostToken)?.name || null,
+      simVersion: meta.simVersion || null,
     };
   }
 

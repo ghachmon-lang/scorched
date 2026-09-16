@@ -8,7 +8,7 @@ export const WEAPONS = {
   baby_nuke: { name: 'Baby Nuke', price: 10000, qty: 3, kind: 'shell', radius: 38, damage: 220, flash: true, color: '#ffff55' },
   nuke: { name: 'Nuke', price: 12000, qty: 1, kind: 'shell', radius: 55, damage: 300, flash: true, color: '#ffff55' },
   leapfrog: { name: 'Leap Frog', price: 10000, qty: 2, kind: 'leapfrog', radius: 18, damage: 110, hops: 3, color: '#55ff55' },
-  funky_bomb: { name: 'Funky Bomb', price: 7000, qty: 2, kind: 'funky', radius: 18, damage: 100, subs: 7, subRadius: 11, subDamage: 22, color: '#ff55ff' },
+  funky_bomb: { name: 'Funky Bomb', price: 7000, qty: 2, kind: 'funky', radius: 18, damage: 100, subs: 7, color: '#ff55ff' },
   mirv: { name: 'MIRV', price: 10000, qty: 3, kind: 'mirv', warheads: 5, radius: 18, damage: 120, color: '#55ffff' },
   deaths_head: { name: "Death's Head", price: 20000, qty: 1, kind: 'mirv', warheads: 5, radius: 34, damage: 200, flash: true, color: '#ff5555' },
   napalm: { name: 'Napalm', price: 10000, qty: 10, kind: 'napalm', particles: 40, life: 140, color: '#ffaa00' },
@@ -39,7 +39,7 @@ export const WEAPON_ORDER = Object.keys(WEAPONS);
 
 // Internal entries (never listed in the shop, never owned directly).
 WEAPONS.funky_sub = { name: 'Funky Bomb', price: 0, qty: 0, kind: 'funky_sub', radius: 11, damage: 60, color: '#ff55ff', hidden: true };
-WEAPONS.tank = { name: 'Tank Explosion', price: 0, qty: 0, kind: 'shell', radius: 20, damage: 100, color: '#ffffff', hidden: true };
+WEAPONS.tank = { name: 'Tank Explosion', price: 0, qty: 0, kind: 'shell', radius: 20, damage: 0, color: '#ffffff', hidden: true }; // damage is computed per death in game.js
 
 export const ITEMS = {
   shield: { short: 'Shield', name: 'Shield', price: 2000, qty: 3, kind: 'shield', points: 100, color: '#55ffff', desc: 'Absorbs 100 points of damage.' },

@@ -1,7 +1,7 @@
 // App controller: screens, the game loop, practice games, and online rooms.
 // Online games live on the room server as a log of sequenced commands; every
 // phone replays that log through the same deterministic simulation.
-import { Game, DEFAULT_SETTINGS, PLAYER_COLORS, W, H } from './game.js';
+import { Game, DEFAULT_SETTINGS, PLAYER_COLORS, W, H, SIM_VERSION } from './game.js';
 import { Renderer } from './render.js';
 import { Sound } from './sound.js';
 import { RoomClient } from './net.js';
@@ -114,7 +114,10 @@ class App {
     return Object.values(this.prefs.games || {}).filter((g) => g && g.code).sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
   }
   rememberGame(view, extra = {}) {
+    const fresh = !this.prefs.games[view.code];
     const g = this.prefs.games[view.code] || { code: view.code, joinedAt: Date.now() };
+    // which rules the game runs on: the server's word, else what we recorded, else (new membership) this build
+    g.simVersion = view.simVersion || g.simVersion || (fresh ? SIM_VERSION : 1);
     const me = view.players.find((p) => p.id === view.you);
     const others = view.players.filter((p) => p.id !== view.you).map((p) => p.name);
     Object.assign(g, {
@@ -591,7 +594,8 @@ class App {
     const set = (id, v) => { const el = $(id); if (el.textContent !== String(v)) el.textContent = v; };
     const nameEl = $('ctl-name');
     set('ctl-name', pl.name);
-    if (nameEl.style.color !== pl.color) nameEl.style.color = pl.color;
+    const sw = $('ctl-swatch');
+    if (sw.style.background !== pl.color) sw.style.background = pl.color;
     set('ctl-hp', `HP ${t.hp}${t.shield ? ` +${t.shield.pts}` : ''}`);
     set('ctl-cash', UI.money(pl.cash));
     set('ctl-wind', `WIND ${Math.abs(g.wind)} ${g.wind < 0 ? '←' : g.wind > 0 ? '→' : ''}`);
@@ -820,7 +824,7 @@ class App {
     this.withName(async (name, color) => {
       UI.showScreen(UI.waitingScreen(this, 'Creating your room…'));
       try {
-        const view = await this.getClient().create({ name, color, settings: this.settings() });
+        const view = await this.getClient().create({ name, color, settings: this.settings(), simVersion: SIM_VERSION });
         this.rememberGame(view);
         this.openLobby(view);
       } catch (e) {
@@ -959,6 +963,16 @@ class App {
 
   /** Build the game from the room's seed and replay its command log. */
   async loadGame(view, cmds, screen) {
+    const saved = this.prefs.games[view.code];
+    const simVersion = view.simVersion || (saved && saved.simVersion) || 1;
+    if (simVersion !== SIM_VERSION) {
+      this.leaveRoomSession();
+      UI.showScreen(UI.waitingScreen(this, simVersion < SIM_VERSION
+        ? 'This game was started on an older version of Scorched Earth and its shots would replay differently now, so it cannot be continued. Start a new room instead.'
+        : 'This game was started on a newer version of Scorched Earth. Reload the app to update, then open it again.',
+        h('button', { class: 'btn', onclick: () => this.forgetGame(view.code) }, 'Forget this game')));
+      return;
+    }
     if (!screen || !screen.isConnected) {
       screen = UI.loadingScreen(this, 'Replaying the game so far…');
       UI.showScreen(screen);
@@ -1062,7 +1076,7 @@ class App {
   }
   async startOnlineGame() {
     try {
-      const view = await this.getClient().start(this.room.code, { seed: randomSeed(), settings: this.settings() });
+      const view = await this.getClient().start(this.room.code, { seed: randomSeed(), settings: this.settings(), simVersion: SIM_VERSION });
       if (!this.game) this.loadGame(view, []);
     } catch (e) {
       UI.toast(e.message, 4000);

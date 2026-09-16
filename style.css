@@ -97,9 +97,9 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .title-scene { position: relative; height: 210px; border: 2px solid; border-color: var(--lo) var(--hi) var(--hi) var(--lo); overflow: hidden; background: linear-gradient(to bottom,
   #1a0a3e 0, #1a0a3e 12%, #4a1266 12%, #4a1266 24%, #7c2074 24%, #7c2074 36%, #b0346a 36%, #b0346a 48%,
   #e0524e 48%, #e0524e 60%, #ff7c3a 60%, #ff7c3a 72%, #ffa838 72%, #ffa838 84%, #ffd24a 84%, #ffd24a 100%); }
-.title-sun { position: absolute; right: 12%; top: 18%; width: 34%; max-width: 150px; aspect-ratio: 1; border-radius: 50%; background: radial-gradient(circle at 42% 42%, #ff2828 0 40%, #c81414 41% 70%, #8c0a0a 71% 100%); box-shadow: 0 0 0 2px #500; }
+.title-sun { position: absolute; right: 8%; top: 30%; width: 30%; max-width: 140px; aspect-ratio: 1; border-radius: 50%; background: #e01818; box-shadow: inset -6px -6px 0 #a00c0c, 0 0 0 2px #500; }
 .title-mountains { position: absolute; left: 0; right: 0; bottom: 0; width: 100%; height: 44%; display: block; }
-.title-text { position: absolute; left: 14px; top: 16px; color: #fff; }
+.title-text { position: absolute; left: 14px; top: 14px; right: 40%; color: #fff; }
 .title-text h1 { font-family: Georgia, "Times New Roman", serif; font-size: clamp(30px, 8vw, 46px); line-height: 1; text-shadow: 3px 3px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000; }
 .title-text .sub { font-family: Georgia, "Times New Roman", serif; font-style: italic; font-size: clamp(14px, 3.6vw, 20px); margin-top: 6px; text-shadow: 2px 2px 0 #000; }
 
@@ -116,7 +116,8 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 #controls { position: relative; flex: none; background: var(--grey); border-top: 2px solid var(--hi); padding: 6px calc(8px + var(--sar)) calc(6px + var(--sab)) calc(8px + var(--sal)); display: flex; flex-direction: column; gap: 6px; }
 #ctl-status { display: flex; gap: 12px; font-size: 13px; align-items: center; padding: 0 4px; flex-wrap: wrap; }
-.ctl-name { font-weight: 700; text-shadow: 0 0 2px #000; }
+.ctl-name { font-weight: 700; color: #000; }
+.ctl-swatch { display: inline-block; width: 14px; height: 14px; border: 1px solid #000; margin-right: -6px; vertical-align: -2px; }
 .ctl-cash { color: #0000aa; font-weight: 700; }
 .ctl-wind { color: var(--dim); margin-left: auto; }
 #ctl-row { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; gap: 6px; }

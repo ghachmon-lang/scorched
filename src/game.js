@@ -14,6 +14,8 @@ export const H = 360;
 export const HUD_H = 20;
 export const FALL_DAMAGE = 0.6; // hit points per pixel fallen without a parachute
 export const NUM_PALETTES = 8;
+/** Bump whenever a change alters simulation outcomes; rooms started on another version cannot be replayed. */
+export const SIM_VERSION = 2;
 export const MAX_TRAILS = 80;
 
 export const DEFAULT_SETTINGS = {
@@ -676,16 +678,17 @@ export class Game {
     }
     const x = hit.x, y = hit.y;
     const dirx = p.vx, diry = p.vy;
+    const direct = hit.type === 'tank' ? hit.tank : -1; // a shell that struck the body takes the full charge
     switch (w.kind) {
       case 'shell':
       case 'tracer':
-        this.explode(x, y, w.radius, w.damage, p.owner, p.weapon);
+        this.explode(x, y, w.radius, w.damage, p.owner, p.weapon, direct);
         break;
       case 'mirv':
-        this.explode(x, y, w.radius, w.damage, p.owner, p.weapon);
+        this.explode(x, y, w.radius, w.damage, p.owner, p.weapon, direct);
         break;
       case 'leapfrog':
-        this.explode(x, y, w.radius, w.damage, p.owner, p.weapon);
+        this.explode(x, y, w.radius, w.damage, p.owner, p.weapon, direct);
         if (p.hops > 1) {
           const sp = dlen(p.vx, p.vy) * 0.75;
           const ang = datan2(-Math.abs(p.vy), p.vx || 0.001);
@@ -695,7 +698,7 @@ export class Game {
         }
         break;
       case 'funky': {
-        this.explode(x, y, w.radius, w.damage, p.owner, p.weapon);
+        this.explode(x, y, w.radius, w.damage, p.owner, p.weapon, direct);
         for (let i = 0; i < w.subs; i++) {
           const q = this.spawnProjectile({
             x, y: y - 2, vx: this.rng.range(-4.5, 4.5), vy: -this.rng.range(3, 8), owner: p.owner,
@@ -706,7 +709,7 @@ export class Game {
         break;
       }
       case 'funky_sub':
-        this.explode(x, y, w.radius, w.damage, p.owner, p.weapon);
+        this.explode(x, y, w.radius, w.damage, p.owner, p.weapon, direct);
         break;
       case 'napalm':
         this.spawnNapalm(x, y, w, p.owner, false);
@@ -716,7 +719,7 @@ export class Game {
         break;
       case 'roller':
         if (hit.type === 'tank' || hit.type === 'shield' || hit.type === 'wall') {
-          this.explode(x, y, w.radius, w.damage, p.owner, p.weapon);
+          this.explode(x, y, w.radius, w.damage, p.owner, p.weapon, direct);
         } else {
           p.mode = 'roll';
           p.dir = sign(p.vx) || 1;
@@ -746,7 +749,7 @@ export class Game {
       case 'digger':
       case 'sandhog':
         if (hit.type === 'tank' || hit.type === 'shield' || hit.type === 'wall' || hit.type === 'floor') {
-          this.explode(x, y, w.radius, w.damage, p.owner, p.weapon);
+          this.explode(x, y, w.radius, w.damage, p.owner, p.weapon, direct);
         } else {
           p.mode = 'dig';
           const l = dlen(p.vx, p.vy) || 1;
@@ -854,10 +857,10 @@ export class Game {
     this.emit(isDirt ? 'dirt' : 'napalm', {});
   }
 
-  explode(x, y, r, dmg, owner, weaponId) {
+  explode(x, y, r, dmg, owner, weaponId, direct = -1) {
     const w = WEAPONS[weaponId] || {};
     const dur = r <= 0 ? 8 : Math.max(14, Math.round(r * 1.4 + 12));
-    this.effects.push({ type: 'explosion', x, y, r, age: 0, dur, peak: Math.max(3, Math.round(dur * 0.4)), applied: false, dmg, owner, weapon: weaponId, style: 'normal' });
+    this.effects.push({ type: 'explosion', x, y, r, age: 0, dur, peak: Math.max(3, Math.round(dur * 0.4)), applied: false, dmg, owner, weapon: weaponId, style: 'normal', direct });
     if (w.flash) this.effects.push({ type: 'flash', age: 0, dur: 10 });
     this.emit('explosion', { r, flash: !!w.flash });
   }
@@ -873,7 +876,7 @@ export class Game {
       const reach = e.r + 6;
       if (d >= reach) continue;
       // a direct hit takes the full charge, like the original; splash falls off with distance
-      const f = d <= 4 ? 1 : 1 - (d - 4) / (reach - 4);
+      const f = t.idx === e.direct || d <= 4 ? 1 : 1 - (d - 4) / (reach - 4);
       const amount = Math.round(e.dmg * f);
       if (amount > 0) this.damage(t.idx, amount, e.owner, e.weapon);
     }

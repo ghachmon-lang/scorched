@@ -132,7 +132,7 @@ export function menuScreen(app) {
 export function titleScene() {
   return h('div', { class: 'title-scene' },
     h('div', { class: 'title-sun' }),
-    h('svg', { class: 'title-mountains', viewBox: '0 0 640 120', preserveAspectRatio: 'none', html: '<polygon fill="#101010" points="0,120 0,78 40,60 80,72 130,38 170,58 210,50 260,22 300,48 340,40 380,64 430,30 470,52 520,44 560,70 600,58 640,80 640,120"/><polygon fill="#2a2a2a" points="0,120 0,96 60,88 120,100 200,84 280,98 360,90 440,104 520,92 600,102 640,96 640,120"/>' }),
+    h('svg', { class: 'title-mountains', viewBox: '0 0 640 120', preserveAspectRatio: 'none', html: '<polygon fill="#000000" points="0,120 0,78 40,60 80,72 130,38 170,58 210,50 260,22 300,48 340,40 380,64 430,30 470,52 520,44 560,70 600,58 640,80 640,120"/>' }),
     h('div', { class: 'title-text' }, h('h1', {}, 'Scorched Earth'), h('div', { class: 'sub' }, 'The Mother of All Games')),
   );
 }
