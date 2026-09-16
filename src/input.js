@@ -41,6 +41,9 @@ export function installInput(app) {
       case 'chat':
         app.openChat();
         break;
+      case 'zoomreset':
+        app.resetView();
+        break;
     }
   };
 
@@ -77,41 +80,97 @@ export function installInput(app) {
   }
   window.addEventListener('blur', () => { for (const b of [...holdTimers.keys()]) stopHold(b); });
 
-  // ---- drag on the battlefield to aim (relative: x = angle, y = power)
+  // ---- battlefield gestures: one finger aims (relative: x = angle, y = power),
+  // two fingers pinch-zoom and pan, double-tap resets the zoom, wheel zooms on desktop
+  const stage = document.getElementById('stage');
+  const pointers = new Map(); // pointerId -> {x, y} in stage coordinates
   let drag = null;
+  let pinch = null;
+  let waitForLift = false; // after a pinch, ignore the remaining finger until it lifts
+  let lastTap = 0;
   const toWorld = (e) => {
     const r = canvas.getBoundingClientRect();
     return { x: ((e.clientX - r.left) / r.width) * W, y: ((e.clientY - r.top) / r.height) * H };
   };
-  canvas.addEventListener('pointerdown', (e) => {
+  const toStage = (e) => {
+    const r = stage.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
+  const pinchGeometry = () => {
+    const [a, b] = [...pointers.values()];
+    return { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
+  };
+  stage.addEventListener('pointerdown', (e) => {
     app.sound.unlock();
-    if (!app.canAct() || !app.prefs.dragAim) return;
+    if (!app.game || (e.target.closest && e.target.closest('#stage-overlay'))) return;
     e.preventDefault();
-    canvas.setPointerCapture(e.pointerId);
+    stage.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, toStage(e));
+    if (pointers.size === 2) {
+      // second finger: the first finger's aiming is undone and a pinch begins
+      if (drag) {
+        if (drag.moved) app.setAim(drag.angle0, drag.power0);
+        drag = null;
+      }
+      const g = pinchGeometry();
+      pinch = { dist0: g.dist, zoom0: app.view.zoom, mx: g.mx, my: g.my };
+      waitForLift = true;
+      return;
+    }
+    if (pointers.size > 2) return;
+    if (waitForLift) return;
+    const now = performance.now();
+    if (now - lastTap < 320) {
+      lastTap = 0;
+      app.resetView();
+      return;
+    }
+    lastTap = now;
+    if (!app.canAct() || !app.prefs.dragAim) return;
     const t = app.game.tanks[app.game.current];
     const w = toWorld(e);
     drag = { id: e.pointerId, x0: w.x, y0: w.y, angle0: t.angle, power0: t.power, moved: false };
     app.showAim();
   });
-  canvas.addEventListener('pointermove', (e) => {
+  stage.addEventListener('pointermove', (e) => {
+    if (!pointers.has(e.pointerId)) return;
+    pointers.set(e.pointerId, toStage(e));
+    if (pinch && pointers.size >= 2) {
+      const g = pinchGeometry();
+      app.setZoom(pinch.zoom0 * (g.dist / pinch.dist0), g.mx, g.my);
+      app.panBy(g.mx - pinch.mx, g.my - pinch.my);
+      pinch.mx = g.mx;
+      pinch.my = g.my;
+      return;
+    }
     if (!drag || e.pointerId !== drag.id || !app.canAct()) return;
     const w = toWorld(e);
     const dx = w.x - drag.x0, dy = w.y - drag.y0;
     if (!drag.moved && Math.abs(dx) < 3 && Math.abs(dy) < 3) return;
     drag.moved = true;
+    lastTap = 0;
     const angle = Math.round(drag.angle0 + dx / 3.2);
     const power = Math.round(drag.power0 - dy * 3);
     app.setAim(angle, power);
     app.showAim();
   });
-  const endDrag = (e) => {
+  const endPointer = (e) => {
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) pinch = null;
+    if (pointers.size === 0) waitForLift = false;
     if (drag && e.pointerId === drag.id) {
       drag = null;
       app.showAim(900);
     }
   };
-  canvas.addEventListener('pointerup', endDrag);
-  canvas.addEventListener('pointercancel', endDrag);
+  stage.addEventListener('pointerup', endPointer);
+  stage.addEventListener('pointercancel', endPointer);
+  stage.addEventListener('wheel', (e) => {
+    if (!app.game) return;
+    e.preventDefault();
+    const p = toStage(e);
+    app.setZoom(app.view.zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15), p.x, p.y);
+  }, { passive: false });
 
   // ---- keyboard
   window.addEventListener('keydown', (e) => {

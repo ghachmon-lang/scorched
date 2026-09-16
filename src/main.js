@@ -53,6 +53,7 @@ class App {
     this.lastReport = '';
     this.loading = false;
     this.swReg = null;
+    this.view = { zoom: 1, panX: 0, panY: 0, fit: 1, baseX: 0, baseY: 0, stageW: 0, stageH: 0 };
     this.applyPrefs();
     installInput(this);
     window.addEventListener('resize', () => this.layout());
@@ -250,6 +251,7 @@ class App {
     this.awaitingTurn = -1;
     this.lastReport = '';
     this.renderer.bgKey = '';
+    this.view.zoom = 1;
     this.enterGame();
     this.handleEvents(game.takeEvents());
     this.checkTransitions(true);
@@ -272,9 +274,59 @@ class App {
     const stage = $('stage');
     if (!stage || $('screen-game').hidden) return;
     const r = stage.getBoundingClientRect();
-    const scale = Math.max(0.1, Math.min(r.width / W, r.height / H));
-    this.canvas.style.width = `${Math.floor(W * scale)}px`;
-    this.canvas.style.height = `${Math.floor(H * scale)}px`;
+    const v = this.view;
+    v.fit = Math.max(0.1, Math.min(r.width / W, r.height / H));
+    v.stageW = r.width;
+    v.stageH = r.height;
+    const cw = Math.floor(W * v.fit), ch = Math.floor(H * v.fit);
+    v.baseX = Math.floor((r.width - cw) / 2);
+    v.baseY = Math.floor((r.height - ch) / 2);
+    this.canvas.style.width = `${cw}px`;
+    this.canvas.style.height = `${ch}px`;
+    this.applyView();
+  }
+
+  /** Position the canvas: fit-to-stage at zoom 1, otherwise zoomed and panned (CSS transform keeps pixels crisp). */
+  applyView() {
+    const v = this.view;
+    const cw = W * v.fit * v.zoom, ch = H * v.fit * v.zoom;
+    // keep the zoomed battlefield covering the stage; centre it on the axis where it is smaller
+    const clampAxis = (pan, size, stage) => (size <= stage ? (stage - size) / 2 : clamp(pan, stage - size, 0));
+    v.panX = clampAxis(v.panX, cw, v.stageW);
+    v.panY = clampAxis(v.panY, ch, v.stageH);
+    this.canvas.style.transform = `translate(${v.panX}px, ${v.panY}px) scale(${v.zoom})`;
+    const btn = $('controls').querySelector('[data-act="zoomreset"]');
+    if (btn) btn.hidden = v.zoom <= 1.001;
+  }
+
+  /** Zoom to `zoom`, keeping the stage point (sx, sy) fixed under the fingers. */
+  setZoom(zoom, sx, sy) {
+    const v = this.view;
+    const z = clamp(zoom, 1, 6);
+    if (sx == null) { sx = v.stageW / 2; sy = v.stageH / 2; }
+    const k = z / v.zoom;
+    v.panX = sx - (sx - v.panX) * k;
+    v.panY = sy - (sy - v.panY) * k;
+    v.zoom = z;
+    this.applyView();
+  }
+  panBy(dx, dy) {
+    this.view.panX += dx;
+    this.view.panY += dy;
+    this.applyView();
+  }
+  resetView() {
+    this.view.zoom = 1;
+    this.applyView();
+  }
+  /** Pan so the world point (wx, wy) sits in the middle of the stage (only while zoomed). */
+  centerOn(wx, wy) {
+    const v = this.view;
+    if (v.zoom <= 1.001) return;
+    const s = v.fit * v.zoom;
+    v.panX = v.stageW / 2 - wx * s;
+    v.panY = v.stageH / 2 - wy * s;
+    this.applyView();
   }
 
   isLocalHuman(idx) {
@@ -395,7 +447,7 @@ class App {
     const snd = this.sound;
     for (const e of events) {
       switch (e.type) {
-        case 'fire': snd.fire(); break;
+        case 'fire': snd.fire(); this.resetView(); break;
         case 'explosion': snd.explosion(e.r); if (e.r >= 30) this.buzz(80); break;
         case 'hit':
           if (e.by !== e.p) snd.hit();
@@ -442,6 +494,8 @@ class App {
       this.sound.turn();
       this.lastHumanTurn = g.current;
       this.showAim(1200);
+      const t = g.tanks[g.current];
+      this.centerOn(t.x, t.y - 20);
     }
     this.refreshControls(true);
   }
