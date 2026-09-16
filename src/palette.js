@@ -1,40 +1,37 @@
-// Sky and land colour schemes in the spirit of the VGA original: a vertical
-// gradient sky and strata-shaded land. One is picked per round.
+// Colour schemes modelled on the original's screens: a flat, single-colour
+// land (green, brown, grey rock, cream, snow) under a solid EGA-blue sky, a
+// black sky full of stars, or a banded VGA sunset. One is picked per round.
 export const PALETTES = [
-  { name: 'Daylight', sky: ['#000a3a', '#0d2aa8', '#2a6ae0', '#7ab8ff'], land: ['#3cc03c', '#26a026', '#1c7f1c', '#155f15', '#0e400e', '#092a09'] },
-  { name: 'Sunset', sky: ['#14042e', '#5c1060', '#c8386a', '#ff9a4a', '#ffe08a'], land: ['#a06428', '#8a5320', '#6e4218', '#553310', '#3e240b', '#281706'] },
-  { name: 'Night', sky: ['#000000', '#02041a', '#060c34', '#0c1a52'], land: ['#5a5a70', '#484860', '#383850', '#2a2a40', '#1e1e30', '#141422'], stars: true },
-  { name: 'Desert', sky: ['#1a3a8a', '#4a80d0', '#a0c8f0', '#f0e0b0'], land: ['#e8c070', '#cc9f4c', '#b0843a', '#946a2c', '#785420', '#5c3e16'] },
-  { name: 'Alien', sky: ['#0a0014', '#3a0850', '#8a1a9a', '#e050d0'], land: ['#30e0b0', '#20b890', '#189070', '#106a52', '#0a4a38', '#062e22'] },
-  { name: 'Arctic', sky: ['#101e3c', '#26487e', '#5a8ac0', '#b8d8f4'], land: ['#f4f8ff', '#d4e0f0', '#b0c0d8', '#8c9cb8', '#687898', '#485874'] },
+  { name: 'Classic', sky: { type: 'solid', color: '#0000aa' }, land: { color: '#3cb43c' } },
+  { name: 'Night rock', sky: { type: 'stars', color: '#000000' }, land: { color: '#b4b4b4', texture: '#8c8c8c' } },
+  { name: 'Desert night', sky: { type: 'stars', color: '#000000' }, land: { color: '#e0dcc0' } },
+  { name: 'Canyon', sky: { type: 'solid', color: '#0000aa' }, land: { color: '#b0602c' } },
+  { name: 'Snow', sky: { type: 'solid', color: '#000088' }, land: { color: '#f0f0f0' } },
+  { name: 'Sunset', sky: { type: 'bands', colors: ['#2a0a4e', '#5a1470', '#8c2a74', '#c04468', '#e8684a', '#ff9a3c', '#ffc850'] }, land: { color: '#a8b0c4', texture: '#8890a4' } },
+  { name: 'Jungle night', sky: { type: 'stars', color: '#000000' }, land: { color: '#2ca02c' } },
+  { name: 'Dusk', sky: { type: 'bands', colors: ['#000028', '#0c0c60', '#202090', '#4838a8', '#7050b8'] }, land: { color: '#c8a060' } },
 ];
 
-function hex(c) {
+export function hex(c) {
   return [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16)];
 }
 
-/** Interpolate a list of colour stops into `n` packed ABGR (little-endian RGBA) values. */
-export function gradientRows(stops, n, dither = false) {
-  const cols = stops.map(hex);
-  const out = new Uint32Array(n);
-  for (let i = 0; i < n; i++) {
-    let t = (i / Math.max(1, n - 1)) * (cols.length - 1);
-    // quantise into visible bands like a 256-colour VGA gradient would
-    if (dither) t = Math.floor(t * 8) / 8;
-    const k = Math.min(cols.length - 2, Math.floor(t));
-    const f = t - k;
-    const a = cols[k], b = cols[k + 1];
-    const r = Math.round(a[0] + (b[0] - a[0]) * f);
-    const g = Math.round(a[1] + (b[1] - a[1]) * f);
-    const bl = Math.round(a[2] + (b[2] - a[2]) * f);
-    out[i] = (255 << 24) | (bl << 16) | (g << 8) | r;
-  }
-  return out;
-}
-
+/** Packed little-endian RGBA for ImageData writes. */
 export function packColor(c) {
   const [r, g, b] = hex(c);
   return (255 << 24) | (b << 16) | (g << 8) | r;
+}
+
+/** One packed colour per sky row: solid, or hard-edged VGA bands. */
+export function skyRows(sky, n) {
+  const out = new Uint32Array(n);
+  if (sky.type === 'bands') {
+    const cols = sky.colors.map(packColor);
+    for (let i = 0; i < n; i++) out[i] = cols[Math.min(cols.length - 1, Math.floor((i / n) * cols.length))];
+  } else {
+    out.fill(packColor(sky.color));
+  }
+  return out;
 }
 
 /** Darken/lighten a hex colour by a factor. */

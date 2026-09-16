@@ -1,22 +1,25 @@
 // Canvas renderer. Draws the 640x360 world at native resolution; CSS scales
 // the canvas with image-rendering: pixelated so every pixel stays crisp.
+// The look follows the 1991 original: flat land, solid or starry sky, thin
+// coloured shot trails that stay all round, ringed explosions, a grey status
+// bar and the wind readout floating in the sky.
 import { W, H, HUD_H } from './game.js';
-import { PALETTES, gradientRows, shade } from './palette.js';
+import { PALETTES, skyRows, packColor, shade } from './palette.js';
 import { drawText, textWidth } from './font.js';
 import { WEAPONS } from './weapons.js';
 import * as PH from './physics.js';
 import { DEG, dsin, dcos } from './mathd.js';
 
 const TANK_SPRITE = [
-  '.....#####.....',
-  '....#######....',
-  '##############.',
-  '###############',
-  '.#############.',
-  '.#.#.#.#.#.#.#.',
-  '..###########..',
+  '.....###.....',
+  '...#######...',
+  '..#########..',
+  '#############',
+  '#############',
+  '.###########.',
 ];
-const LAND_TOP = HUD_H + 40;
+const HUD_BG = '#c0c0c0';
+const HUD_FG = '#000000';
 
 export class Renderer {
   constructor(canvas) {
@@ -36,17 +39,19 @@ export class Renderer {
   preparePalette(idx) {
     if (this.palKey === idx) return;
     const pal = PALETTES[idx % PALETTES.length];
-    this.skyRows = gradientRows(pal.sky, H, true);
-    this.landRows = gradientRows(pal.land, H - LAND_TOP, true);
+    this.pal = pal;
+    this.skyRows = skyRows(pal.sky, H);
+    this.landColor = packColor(pal.land.color);
+    this.texColor = pal.land.texture ? packColor(pal.land.texture) : 0;
     this.stars = [];
-    if (pal.stars) {
-      let s = 1234 + idx;
-      for (let i = 0; i < 90; i++) {
+    if (pal.sky.type === 'stars') {
+      let s = 1234 + idx * 77;
+      for (let i = 0; i < 140; i++) {
         s = (Math.imul(s, 1103515245) + 12345) >>> 0;
         const x = s % W;
         s = (Math.imul(s, 1103515245) + 12345) >>> 0;
-        const y = HUD_H + (s % Math.floor(H * 0.6));
-        this.stars.push(x, y, i % 3 === 0 ? 0xffffffff : 0xffb0b0b0);
+        const y = HUD_H + (s % (H - HUD_H));
+        this.stars.push(x, y, i % 4 === 0 ? 0xffffffff : 0xffa8a8a8);
       }
     }
     this.palKey = idx;
@@ -56,12 +61,16 @@ export class Renderer {
     this.preparePalette(game.palette);
     const bits = game.terrain.bits;
     const d = this.bg32;
-    const sky = this.skyRows, land = this.landRows;
+    const sky = this.skyRows, land = this.landColor, tex = this.texColor;
     for (let y = 0; y < H; y++) {
       const row = y * W;
-      const lc = y >= LAND_TOP ? land[y - LAND_TOP] : land[0];
       const sc = sky[y];
-      for (let x = 0; x < W; x++) d[row + x] = bits[x * H + y] ? lc : sc;
+      for (let x = 0; x < W; x++) {
+        if (bits[x * H + y]) {
+          // rock texture: a sparse deterministic speckle
+          d[row + x] = tex && ((Math.imul(x, 73856093) ^ Math.imul(y, 19349663)) >>> 0) % 5 === 0 ? tex : land;
+        } else d[row + x] = sc;
+      }
     }
     for (let i = 0; i < this.stars.length; i += 3) {
       const x = this.stars[i], y = this.stars[i + 1];
@@ -69,7 +78,7 @@ export class Renderer {
     }
   }
 
-  /** Draw one frame. view = { aim: {angle,power}|null, myPlayers:Set, speed } */
+  /** Draw one frame. view = { aim: {angle,power}|null, speed } */
   draw(game, view = {}) {
     const ctx = this.ctx;
     this.frame++;
@@ -86,19 +95,31 @@ export class Renderer {
     this.drawProjectiles(game);
     this.drawEffects(game);
     this.drawMarkers(game);
+    this.drawWind(game);
     this.drawTaunts(game);
     if (view.aim && game.phase === 'aim') this.drawAimPreview(game, view.aim);
-    this.drawHud(game, view);
+    this.drawHud(game);
   }
 
   drawTrails(game) {
     const ctx = this.ctx;
+    ctx.lineWidth = 1;
     for (const tr of game.trails) {
       const pts = tr.points;
-      ctx.fillStyle = tr.color;
-      ctx.globalAlpha = 0.75;
-      for (let i = 0; i < pts.length; i += 6) ctx.fillRect(pts[i], pts[i + 1], 1, 1);
-      ctx.globalAlpha = 1;
+      if (pts.length < 4) continue;
+      ctx.strokeStyle = tr.color;
+      ctx.beginPath();
+      let px = pts[0], py = pts[1];
+      ctx.moveTo(px + 0.5, py + 0.5);
+      for (let i = 2; i < pts.length; i += 2) {
+        const x = pts[i], y = pts[i + 1];
+        // wrap-around walls teleport the shell: don't draw a line across the screen
+        if (Math.abs(x - px) > W / 2) ctx.moveTo(x + 0.5, y + 0.5);
+        else ctx.lineTo(x + 0.5, y + 0.5);
+        px = x;
+        py = y;
+      }
+      ctx.stroke();
     }
   }
 
@@ -108,7 +129,7 @@ export class Renderer {
       if (e.type !== 'smoke') continue;
       const f = e.age / e.dur;
       const r = 1 + Math.min(4, e.age / 25);
-      ctx.fillStyle = `rgba(180,180,190,${0.7 * (1 - f)})`;
+      ctx.fillStyle = `rgba(200,200,200,${0.8 * (1 - f)})`;
       this.disc(e.x, e.y - e.age * 0.08, r);
     }
   }
@@ -138,9 +159,7 @@ export class Renderer {
     const ctx = this.ctx;
     const pl = game.players[t.idx];
     const color = pl.color;
-    const dark = shade(color, 0.55);
-    const x0 = t.x - 7, y0 = t.y - 6;
-    // barrel first so the body covers its root
+    const x0 = t.x - 6, y0 = t.y - 5;
     const a = t.angle * DEG;
     const px = t.x, py = t.y - 3;
     const tx = px + dcos(a) * PH.BARREL_LEN, ty = py - dsin(a) * PH.BARREL_LEN;
@@ -150,16 +169,15 @@ export class Renderer {
     ctx.moveTo(px + 0.5, py + 0.5);
     ctx.lineTo(tx + 0.5, ty + 0.5);
     ctx.stroke();
-    for (let r = 0; r < 7; r++) {
+    ctx.fillStyle = color;
+    for (let r = 0; r < TANK_SPRITE.length; r++) {
       const row = TANK_SPRITE[r];
-      ctx.fillStyle = r === 5 ? dark : color;
-      for (let c = 0; c < 15; c++) if (row[c] === '#') ctx.fillRect(x0 + c, y0 + r, 1, 1);
+      for (let c = 0; c < row.length; c++) if (row[c] === '#') ctx.fillRect(x0 + c, y0 + r, 1, 1);
     }
     if (t.chute && t.falling) {
       ctx.fillStyle = '#ffffff';
       this.ring(t.x, t.y - 14, 8);
       ctx.fillRect(t.x - 8, t.y - 14, 17, 1);
-      ctx.fillRect(t.x - 8, t.y - 14, 1, 1);
     }
     if (t.shield) {
       ctx.fillStyle = t.shield.color || '#55ffff';
@@ -171,21 +189,19 @@ export class Renderer {
       const w = textWidth(name, 1);
       let lx = Math.round(t.x - w / 2);
       lx = Math.max(1, Math.min(W - w - 1, lx));
-      const ly = t.y - 19;
-      ctx.fillStyle = 'rgba(0,0,0,0.45)';
-      ctx.fillRect(lx - 1, ly - 1, w + 2, 9);
+      const ly = t.y - 17;
+      drawText(ctx, name, lx + 1, ly + 1, '#000000', 1);
       drawText(ctx, name, lx, ly, color, 1);
-      // hp bar
-      const bw = 16;
-      const bx = t.x - 8, by = t.y - 10;
-      ctx.fillStyle = 'rgba(0,0,0,0.6)';
-      ctx.fillRect(bx - 1, by - 1, bw + 2, 4);
+      const bw = 14;
+      const bx = t.x - 7, by = t.y - 9;
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(bx - 1, by - 1, bw + 2, 3);
       ctx.fillStyle = t.hp > 50 ? '#55ff55' : t.hp > 25 ? '#ffff55' : '#ff5555';
-      ctx.fillRect(bx, by, Math.round((bw * t.hp) / 100), 2);
+      ctx.fillRect(bx, by, Math.round((bw * t.hp) / 100), 1);
     }
     if (game.phase === 'aim' && game.current === t.idx) {
       const bob = Math.round(Math.sin(this.frame / 6) * 2);
-      const my = t.y - (this.options.labels ? 30 : 20) + bob;
+      const my = t.y - (this.options.labels ? 26 : 18) + bob;
       ctx.fillStyle = color;
       ctx.fillRect(t.x - 3, my - 2, 7, 1);
       ctx.fillRect(t.x - 2, my - 1, 5, 1);
@@ -201,10 +217,6 @@ export class Renderer {
       if (p.mode === 'fly') {
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(Math.round(p.x) - 1, Math.round(p.y) - 1, 2, 2);
-        if (w.kind === 'napalm' || w.flash) {
-          ctx.fillStyle = w.color;
-          ctx.fillRect(Math.round(p.x) - 1, Math.round(p.y) - 1, 1, 1);
-        }
       } else if (p.mode === 'roll') {
         ctx.fillStyle = w.color;
         this.disc(p.x, p.y - 2, 3);
@@ -226,11 +238,11 @@ export class Renderer {
           this.drawExplosion(e);
           break;
         case 'napalm': {
-          const cols = e.dirt ? ['#a06428', '#8a5320', '#c08040'] : ['#ffff55', '#ffaa00', '#ff5500', '#ffffff'];
+          const cols = e.dirt ? ['#a06428', '#8a5320', '#c08040'] : ['#ffff55', '#ffaa00', '#ff5500', '#ff5555'];
           for (let i = 0; i < e.parts.length; i++) {
             const q = e.parts[i];
             ctx.fillStyle = cols[(i + this.frame) % cols.length];
-            ctx.fillRect(Math.round(q.x), Math.round(q.y) - 1, e.dirt ? 2 : 2, 2);
+            ctx.fillRect(Math.round(q.x), Math.round(q.y) - 1, 2, 2);
           }
           break;
         }
@@ -276,22 +288,21 @@ export class Renderer {
       return;
     }
     if (r < 1) r = 1;
-    const flick = (this.frame & 1) ? 0.06 : 0;
-    const layers = [
-      ['#ff2020', 1.0],
-      ['#ff7a00', 0.8 - flick],
-      ['#ffe040', 0.58 + flick],
-      ['#ffffff', 0.32],
-    ];
-    if (e.r >= 30) layers.unshift(['#800000', 1.06]);
-    for (const [c, f] of layers) {
-      ctx.fillStyle = c;
-      this.disc(e.x, e.y, r * f);
+    // concentric EGA bands, funky bomblets in the magenta family
+    const funky = e.weapon === 'funky_sub' || e.weapon === 'funky_bomb';
+    const bands = funky
+      ? ['#ff55ff', '#aa00aa', '#ff55ff', '#ffffff']
+      : ['#ff5555', '#ff55ff', '#ffaa00', '#ffff55', '#ffffff'];
+    // alternate the two outer bands every other frame so the fireball flickers
+    if (this.frame & 1) [bands[0], bands[1]] = [bands[1], bands[0]];
+    const n = bands.length;
+    for (let i = 0; i < n; i++) {
+      ctx.fillStyle = bands[i];
+      this.disc(e.x, e.y, r * (1 - i / n));
     }
-    // thin dark ring at the edge when the crater is being blasted
-    if (t >= peak - 1 && t <= peak + 2 && e.r > 0) {
-      ctx.fillStyle = '#000';
-      this.ring(e.x, e.y, e.r + 1, true);
+    if (e.r >= 30) {
+      ctx.fillStyle = '#aa0000';
+      this.ring(e.x, e.y, r + 1);
     }
   }
 
@@ -310,6 +321,21 @@ export class Renderer {
     }
   }
 
+  drawWind(game) {
+    const ctx = this.ctx;
+    const wv = Math.abs(game.wind);
+    const arrow = game.wind < 0 ? '← ' : game.wind > 0 ? '→ ' : '';
+    const lines = [`${arrow}Wind: ${wv}`, `Round ${game.round}/${game.rounds}`];
+    let y = HUD_H + 4;
+    for (const text of lines) {
+      const w = textWidth(text, 2);
+      const x = W - 6 - w;
+      drawText(ctx, text, x + 1, y + 1, '#000000', 2);
+      drawText(ctx, text, x, y, '#ffffff', 2);
+      y += 17;
+    }
+  }
+
   drawTaunts(game) {
     const ctx = this.ctx;
     for (const e of game.effects) {
@@ -318,8 +344,8 @@ export class Renderer {
       const w = textWidth(e.text, 2);
       let x = Math.round(t.x - w / 2);
       x = Math.max(2, Math.min(W - w - 2, x));
-      let y = t.y - 50;
-      if (y < HUD_H + 4) y = HUD_H + 4;
+      let y = t.y - 46;
+      if (y < HUD_H + 22) y = HUD_H + 22;
       const fade = e.age > e.dur - 15 ? (e.dur - e.age) / 15 : 1;
       ctx.globalAlpha = Math.max(0, fade);
       ctx.fillStyle = '#000';
@@ -329,7 +355,7 @@ export class Renderer {
       ctx.fillRect(x - 3, y + 16, w + 6, 1);
       ctx.fillRect(x - 3, y - 3, 1, 20);
       ctx.fillRect(x + w + 2, y - 3, 1, 20);
-      drawText(ctx, e.text, x, y, '#ffffff', 2);
+      drawText(ctx, e.text, x, y, '#ffffff', 2, true);
       ctx.globalAlpha = 1;
     }
   }
@@ -347,46 +373,42 @@ export class Renderer {
     ctx.globalAlpha = 1;
   }
 
-  drawHud(game, view) {
+  drawHud(game) {
     const ctx = this.ctx;
-    ctx.fillStyle = '#000';
+    ctx.fillStyle = HUD_BG;
     ctx.fillRect(0, 0, W, HUD_H);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, W, 1);
+    ctx.fillStyle = '#606060';
+    ctx.fillRect(0, HUD_H - 1, W, 1);
     const pl = game.players[game.current];
     const t = game.tanks[game.current];
     const y = 3;
-    let x = 4;
+    let x = 6;
     if (game.phase === 'shop') {
-      drawText(ctx, 'SHOPPING...', x, y, '#ffff55', 2);
+      drawText(ctx, 'Shopping...', x, y, HUD_FG, 2);
     } else if (game.phase === 'gameOver') {
-      drawText(ctx, 'GAME OVER', x, y, '#ffff55', 2);
+      drawText(ctx, 'Game over', x, y, HUD_FG, 2);
     } else if (pl) {
-      ctx.fillStyle = pl.color;
-      ctx.fillRect(x, y + 2, 10, 10);
-      x += 14;
+      x += drawText(ctx, `Power: ${t.power}`, x, y, HUD_FG, 2) + 16;
+      x += drawText(ctx, `Angle: ${t.angle}`, x, y, HUD_FG, 2) + 16;
       const name = pl.name.length > 12 ? pl.name.slice(0, 12) : pl.name;
-      x += drawText(ctx, name, x, y, pl.color, 2) + 14;
-      x += drawText(ctx, 'ANG', x, y, '#aaaaaa', 2) + 6;
-      x += drawText(ctx, String(t.angle), x, y, '#ffffff', 2) + 12;
-      x += drawText(ctx, 'POW', x, y, '#aaaaaa', 2) + 6;
-      x += drawText(ctx, String(t.power), x, y, '#ffffff', 2) + 12;
-      x += drawText(ctx, 'WIND', x, y, '#aaaaaa', 2) + 6;
-      const wv = Math.abs(game.wind);
-      const arrow = game.wind < 0 ? '←' : game.wind > 0 ? '→' : '';
-      x += drawText(ctx, `${wv}${arrow}`, x, y, wv > 60 ? '#ff5555' : '#ffffff', 2) + 12;
+      const nw = textWidth(name, 2);
+      ctx.fillStyle = '#404040';
+      ctx.fillRect(x - 3, y - 2, nw + 6, 18);
+      x += drawText(ctx, name, x, y, pl.color, 2) + 18;
       const w = WEAPONS[t.weapon];
       const cnt = game.weaponCount(pl, t.weapon);
-      const wname = `${w.name} ${cnt === Infinity ? '∞' : cnt}`;
-      const roundTxt = `R${game.round}/${game.rounds}`;
-      const rw = textWidth(roundTxt, 2);
-      const maxW = W - 6 - rw - 10 - x - (view.speed > 1 ? 34 : 0);
-      const label = textWidth(wname, 2) > maxW ? wname.slice(0, Math.floor(maxW / 12)) : wname;
-      drawText(ctx, label, x, y, w.color === '#ffffff' ? '#55ffff' : w.color, 2);
-      drawText(ctx, roundTxt, W - 4 - rw, y, '#aaaaaa', 2);
-    }
-    if (view.speed && view.speed > 1) {
-      const tag = `${view.speed}X`;
-      const rw = textWidth(`R${game.round}/${game.rounds}`, 2);
-      drawText(ctx, tag, W - 4 - rw - 10 - textWidth(tag, 2), y, '#ffff55', 2);
+      const wname = `${cnt === Infinity ? '' : cnt + ': '}${w.name}`;
+      const maxW = W - 8 - 12 - x;
+      const label = textWidth(wname, 2) > maxW ? wname.slice(0, Math.max(3, Math.floor(maxW / 12))) : wname;
+      // small tank glyph before the weapon name
+      ctx.fillStyle = HUD_FG;
+      ctx.fillRect(x, y + 6, 8, 3);
+      ctx.fillRect(x + 2, y + 4, 4, 2);
+      ctx.fillRect(x + 5, y + 2, 4, 1);
+      x += 12;
+      drawText(ctx, label, x, y, HUD_FG, 2);
     }
   }
 }

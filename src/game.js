@@ -13,7 +13,8 @@ export const W = 640;
 export const H = 360;
 export const HUD_H = 20;
 export const FALL_DAMAGE = 0.6; // hit points per pixel fallen without a parachute
-export const NUM_PALETTES = 6;
+export const NUM_PALETTES = 8;
+export const MAX_TRAILS = 80;
 
 export const DEFAULT_SETTINGS = {
   rounds: 5,
@@ -390,7 +391,6 @@ export class Game {
     const w = WEAPONS[t.weapon];
     const s = this.settings;
     this.wallsThisShot = s.walls === 'random' ? this.rng.pick(['concrete', 'rubber', 'spring', 'wrap']) : s.walls;
-    this.trails = [];
     this.turnShotBy = this.current;
     this.turnDamaged = new Set();
     this.turnNo++;
@@ -411,8 +411,10 @@ export class Game {
       mode: 'fly', age: 0, hops: w.hops || 0, split: false, bounces: 0, sub: false, immune: false, noHit: 0,
       ...init,
     };
+    // trails stay on screen for the whole round, like the original
     p.trail = { color: this.players[p.owner].color, points: [] };
     this.trails.push(p.trail);
+    if (this.trails.length > MAX_TRAILS) this.trails.shift();
     this.projectiles.push(p);
     return p;
   }
@@ -870,7 +872,9 @@ export class Game {
       const d = dlen(t.x - e.x, t.y - 3 - e.y);
       const reach = e.r + 6;
       if (d >= reach) continue;
-      const amount = Math.round(e.dmg * (1 - d / reach));
+      // a direct hit takes the full charge, like the original; splash falls off with distance
+      const f = d <= 4 ? 1 : 1 - (d - 4) / (reach - 4);
+      const amount = Math.round(e.dmg * f);
       if (amount > 0) this.damage(t.idx, amount, e.owner, e.weapon);
     }
   }
@@ -1012,7 +1016,7 @@ export class Game {
       if (this.settings.talkingTanks) this.say(t.idx, 'death');
       this.emit('death', { p: t.idx, by: killer });
       const r = this.settings.tankExplosions ? 14 + this.rng.int(26) : 8;
-      const dmg = this.settings.tankExplosions ? Math.round(r * 1.6) : 0;
+      const dmg = this.settings.tankExplosions ? Math.round(r * 2.5) : 0;
       this.explode(t.x, t.y - 3, r, dmg, killer >= 0 ? killer : t.idx, 'tank');
     }
   }
