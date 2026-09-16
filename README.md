@@ -62,7 +62,8 @@ Then put `http://127.0.0.1:8787` (or your machine's address for phones on the sa
 
 | Touch | Keyboard |
 |---|---|
-| Drag anywhere on the battlefield: left/right changes the angle, up/down the power | `←` `→` angle, `↑` `↓` power (`Shift` for bigger steps), `PgUp`/`PgDn` power ±100 |
+| One finger anywhere on the battlefield: left/right changes the angle, up/down the power | `←` `→` angle, `↑` `↓` power (`Shift` for bigger steps), `PgUp`/`PgDn` power ±100 |
+| Two fingers: pinch to zoom, drag to pan; double-tap or ⤢ resets; every shot snaps back to the full view | Mouse wheel zooms |
 | ◀ ▶ − + buttons, hold to repeat | `Tab` / `Shift+Tab` cycle weapons |
 | WEAPON and ITEMS sheets | `W` weapons, `I` items |
 | FIRE | `Space` or `Enter` |
